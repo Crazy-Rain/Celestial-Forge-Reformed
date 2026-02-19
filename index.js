@@ -172,7 +172,9 @@ class CelestialForgeTracker {
         this.state.bonus_cp = Math.max(0, this.state.bonus_cp + needed);
         this.calcTotals();
         this.save();
-        this.broadcast();
+        this.broadcast(); // broadcast calls updatePromptInjection
+        // Also push directly in case broadcast is delayed
+        setTimeout(() => updatePromptInjection(), 100);
     }
 
     addBonusCP(amount) {
@@ -1018,7 +1020,22 @@ function dbRandomConstellation() {
 
 // Active roll state — what's currently pending player decision
 let cfrActiveRoll = null;
-// 'creation_pending' means we injected the generation prompt, waiting for AI response
+// Persisted to sessionStorage so partial/continued responses don't lose the flag
+function cfrGetAwaiting() {
+    return sessionStorage.getItem('cfr_awaiting_creation') === 'true';
+}
+function cfrSetAwaiting(val, constellation) {
+    if (val) {
+        sessionStorage.setItem('cfr_awaiting_creation', 'true');
+        if (constellation) sessionStorage.setItem('cfr_creation_const', constellation);
+    } else {
+        sessionStorage.removeItem('cfr_awaiting_creation');
+    }
+}
+function cfrGetConstellation() {
+    return sessionStorage.getItem('cfr_creation_const') || null;
+}
+// Legacy in-memory flags — kept for compat but sessionStorage is authoritative
 let cfrAwaitingCreation = false;
 let cfrCreationConstellation = null;
 
@@ -1104,6 +1121,7 @@ async function triggerCreationRoll(constellationKey, tier) {
 
     cfrCreationConstellation = key;
     cfrAwaitingCreation      = true;
+    cfrSetAwaiting(true, key); // persist across continuations
 
     const prompt = buildCreationPrompt(key, t);
 
@@ -1120,16 +1138,14 @@ async function triggerCreationRoll(constellationKey, tier) {
 
 // After a creation roll — AI has responded, parse the new perk
 async function finalizeCreationRoll(text) {
-    if (!cfrAwaitingCreation) return;
-    cfrAwaitingCreation = false;
+    // Check both memory and sessionStorage — handles continued responses
+    const isAwaiting = cfrAwaitingCreation || cfrGetAwaiting();
+    if (!isAwaiting) return;
 
-    // Clear creation prompt injection
-    try {
-        const ctx = SillyTavern.getContext();
-        if (typeof ctx.setExtensionPrompt === 'function') {
-            ctx.setExtensionPrompt('cfr-creation-roll', '', 0, 0);
-        }
-    } catch(e) {}
+    // Restore constellation from sessionStorage if memory flag was lost
+    if (!cfrCreationConstellation) {
+        cfrCreationConstellation = cfrGetConstellation();
+    }
 
     let perk = null;
 
@@ -1183,10 +1199,21 @@ async function finalizeCreationRoll(text) {
     }
 
     if (!perk) {
-        console.warn('[CFR] Creation roll: all parse strategies failed. AI may not have followed format.');
-        showRollToast('Could not parse perk from AI response — check format', true);
+        // Don't clear the flag — leave awaiting active so a continuation can still be caught
+        console.warn('[CFR] Creation roll: all parse strategies failed — keeping await flag for continuation.');
+        showRollToast('Perk not parsed yet — if AI is still generating, it will be caught on continuation', false);
         return;
     }
+
+    // Only clear flags after successful parse
+    cfrAwaitingCreation = false;
+    cfrSetAwaiting(false);
+    try {
+        const ctx = SillyTavern.getContext();
+        if (typeof ctx.setExtensionPrompt === 'function') {
+            ctx.setExtensionPrompt('cfr-creation-roll', '', 0, 0);
+        }
+    } catch(e) {}
 
     cfrActiveRoll = {
         type:               'creation',
@@ -1210,8 +1237,11 @@ async function finalizeCreationRoll(text) {
 
 function parsePerkFromMatch(match, fullText) {
     const afterHeader = fullText.slice(fullText.indexOf(match[0]) + match[0].length).trim();
+    // Strip surrounding square brackets AI sometimes adds: **[Name]** -> Name
+    const rawName = match[1].trim();
+    const cleanName = rawName.replace(/^\[|\]$/g, '').trim();
     return {
-        name:               match[1].trim(),
+        name:               cleanName,
         cost:               parseInt(match[2]),
         flags:              match[3].split(/[,\s]+/).map(f=>f.trim()).filter(Boolean),
         description:        extractDescription(fullText, match[0]),
@@ -1241,15 +1271,21 @@ function extractDescriptionFromText(text, perkName) {
 }
 
 function extractScalingDescription(text) {
-    // Look for SCALING: section with tier breakpoints
-    const scalingMatch = text.match(/SCALING:\s*\n([\s\S]*?)(?=\n\n|```forge|$)/);
+    // Match both plain "SCALING:" and bold "**SCALING:**" formats
+    const scalingMatch = text.match(/\*{0,2}SCALING:\*{0,2}\s*\n([\s\S]*?)(?=\n\n\n|```forge|\[END|$)/);
     if (!scalingMatch) return null;
 
     const lines  = scalingMatch[1].split('\n').filter(l => l.trim());
     const result = {};
     for (const line of lines) {
-        const m = line.match(/^(\d+(?:-\d+)?):\s*(.+)/);
-        if (m) result[m[1]] = m[2].trim();
+        // Match: **1-3:** text  OR  1-3: text  OR  **10:** text
+        const m = line.match(/^\*{0,2}(\d+(?:-\d+)?):\*{0,2}\s*(.+)/);
+        if (m) {
+            const key = m[1].trim();
+            // Strip any remaining leading/trailing bold markers from value
+            const val = m[2].replace(/^\*+|\*+$/g, '').trim();
+            result[key] = val;
+        }
     }
     return Object.keys(result).length ? result : null;
 }
@@ -2582,7 +2618,48 @@ function loadExtensionSettingsUI() {
 //  MESSAGE HANDLING
 // ============================================================
 
-function onMessageReceived(data) {
+// Passive scanner — catches perk headers in ANY response even without an active roll
+// Shows a toast so the player can manually add if needed
+function passivePerkScan(text) {
+    const match = text.match(/^\*\*\[?([^*:\n\[\]]+?)\]?\*\*\s*\((\d+)\s*CP\)\s*\[([^\]]*)\]/m);
+    if (!match) return;
+    const name  = match[1].trim();
+    const cost  = parseInt(match[2]);
+    const flags = match[3].split(/[,\s]+/).map(f => f.trim()).filter(Boolean);
+
+    // Only surface it if it's not already acquired
+    const already = cfrTracker?.state?.acquired_perks?.some(p =>
+        p.name.toLowerCase() === name.toLowerCase()
+    );
+    if (already) return;
+
+    console.log('[CFR] Passive scan found perk:', name, cost, flags);
+
+    // Build a roll card for it so player can still Acquire/Bank/Discard
+    const perk = {
+        name, cost, flags,
+        description: extractDescriptionFromText(text, name),
+        scaling_description: extractScalingDescription(text),
+        source: 'detected'
+    };
+    cfrActiveRoll = {
+        type: 'creation',
+        perk,
+        constellationKey:   cfrCreationConstellation || '',
+        constellationLabel: CFR_CONSTELLATIONS[cfrCreationConstellation] || 'Unknown Constellation'
+    };
+
+    const hud = document.getElementById('cfr-hud');
+    const btn = document.getElementById('cfr-hud-btn');
+    if (hud && hud.classList.contains('hidden')) {
+        hud.classList.remove('hidden');
+        if (btn) btn.classList.add('open');
+    }
+    showRollResult(perk, cfrActiveRoll.constellationKey, cfrActiveRoll.constellationLabel, 'creation');
+    showRollToast('Perk detected in response — choose Acquire, Bank, or Discard');
+}
+
+async function onMessageReceived(data) {
     if (!cfrTracker || !cfrSettings?.enabled) return;
 
     // Index-based dedup
@@ -2597,9 +2674,14 @@ function onMessageReceived(data) {
 
     if (cfrSettings.debug_mode) console.log('[CFR] 📨 Processing message idx', idx);
 
-    // If we were waiting for a creation roll response, handle it first
-    if (cfrAwaitingCreation) {
-        finalizeCreationRoll(text);
+    // Check both memory and sessionStorage for awaiting flag
+    const isAwaitingRoll = cfrAwaitingCreation || cfrGetAwaiting();
+    if (isAwaitingRoll) {
+        await finalizeCreationRoll(text);
+    } else {
+        // Fallback: always scan for perk format even without an active roll
+        // catches cases where the flag was lost between click and response
+        passivePerkScan(text);
     }
 
     cfrTracker.processResponse(text);
