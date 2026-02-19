@@ -1,0 +1,569 @@
+/* ============================================================
+   CELESTIAL FORGE REFORMED v1.0 — style.css
+   Sections:
+     1. Tracker Drawer Panel
+     2. Manual Controls
+     3. HUD Floating Panel
+     4. In-Chat Details Injection
+     5. Forge Block Hiding
+   ============================================================ */
+
+
+/* ── 1. TRACKER DRAWER PANEL ──────────────────────────────── */
+
+.cfr-panel { margin-bottom: 10px; }
+
+.cfr-panel .inline-drawer-header {
+    background: linear-gradient(145deg, #1a1a2e, #16213e);
+    border: 1px solid #e94560;
+    border-radius: 8px;
+    padding: 10px;
+}
+.cfr-panel .inline-drawer-header b { color: #e94560; }
+
+.cfr-panel .inline-drawer-content {
+    background: rgba(26, 26, 46, 0.9);
+    border: 1px solid #333;
+    border-top: none;
+    border-radius: 0 0 8px 8px;
+    padding: 10px;
+    overflow: hidden; /* prevent bleed into ST layout */
+}
+
+/* Stat rows */
+.cfr-status-section {
+    background: rgba(0,0,0,0.3);
+    border-radius: 6px;
+    padding: 10px;
+    margin-bottom: 10px;
+}
+.cfr-stat-row {
+    display: flex;
+    justify-content: space-between;
+    padding: 4px 0;
+    font-size: 13px;
+}
+.cfr-stat-row span:first-child { color: #aaa; }
+.cfr-value { font-weight: bold; color: #ffd700; }
+
+/* Progress bars */
+.cfr-bar-wrap {
+    margin-top: 8px;
+}
+.cfr-bar-label-row {
+    display: flex;
+    justify-content: space-between;
+    font-size: 11px;
+    color: #aaa;
+    margin-bottom: 3px;
+}
+.cfr-progress-bar {
+    background: #333;
+    border-radius: 8px;
+    height: 10px;
+    overflow: hidden;
+    border: 1px solid #444;
+}
+.cfr-progress-fill {
+    height: 100%;
+    transition: width 0.4s ease;
+    border-radius: 6px;
+}
+.cfr-progress-fill.cp         { background: linear-gradient(90deg, #ffd700, #ff8c00); }
+.cfr-progress-fill.corruption { background: linear-gradient(90deg, #9b59b6, #6c3483); }
+.cfr-progress-fill.sanity     { background: linear-gradient(90deg, #3498db, #1a5276); }
+
+/* Pending perk */
+.cfr-pending {
+    background: rgba(241,196,15,0.1);
+    border: 1px dashed #f1c40f;
+    border-radius: 8px;
+    padding: 8px;
+    margin-top: 8px;
+    display: none;
+}
+.cfr-pending-title { color: #f1c40f; font-size: 10px; text-transform: uppercase; }
+.cfr-pending-name  { color: #fff; font-weight: bold; }
+.cfr-pending-note  { color: #f1c40f; font-size: 11px; margin-top: 3px; }
+
+/* Perk list */
+.cfr-perk-list {
+    max-height: 300px;
+    overflow-y: auto;
+    margin-top: 10px;
+    padding: 5px;
+    background: rgba(0,0,0,0.2);
+    border-radius: 6px;
+}
+.cfr-perk-item {
+    display: block;
+    padding: 8px 10px;
+    margin: 6px 0;
+    background: rgba(233,69,96,0.1);
+    border-left: 3px solid #e94560;
+    border-radius: 4px;
+    font-size: 12px;
+}
+.cfr-perk-item.cfr-inactive {
+    opacity: 0.5;
+    border-left-color: #666;
+}
+.cfr-perk-name { color: #fff; font-weight: bold; }
+.cfr-perk-cost { color: #ffd700; font-size: 11px; }
+.cfr-perk-desc { font-size: 10px; color: #999; font-style: italic; margin-top: 3px; }
+
+.cfr-perk-flags { display: flex; flex-wrap: wrap; gap: 4px; margin-top: 5px; }
+.cfr-flag {
+    border-radius: 10px;
+    padding: 2px 6px;
+    font-size: 9px;
+    border: 1px solid #e94560;
+    background: rgba(233,69,96,0.2);
+    color: #e94560;
+}
+.cfr-flag.scaling     { border-color:#2ecc71; background:rgba(46,204,113,0.2); color:#2ecc71; }
+.cfr-flag.uncapped    { border-color:#f1c40f; background:rgba(241,196,15,0.2); color:#f1c40f; }
+.cfr-flag.toggleable  { border-color:#3498db; background:rgba(52,152,219,0.2); color:#3498db; }
+.cfr-flag.gamer       { border-color:#e67e22; background:rgba(230,126,34,0.2); color:#e67e22; }
+.cfr-flag.metascaling { border-color:#e67e22; background:rgba(230,126,34,0.2); color:#e67e22; }
+.cfr-flag.corrupting  { border-color:#9b59b6; background:rgba(155,89,182,0.2); color:#9b59b6; }
+.cfr-flag.sanitytaxing{ border-color:#7f8c8d; background:rgba(52,73,94,0.4);  color:#bdc3c7; }
+.cfr-flag.passive     { border-color:#95a5a6; background:rgba(149,165,166,0.1);color:#95a5a6; }
+
+/* Scaling bar */
+.cfr-scaling-bar {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-top: 5px;
+    padding: 4px 6px;
+    background: rgba(46,204,113,0.1);
+    border-radius: 4px;
+}
+.cfr-scaling-label     { font-size:10px; color:#2ecc71; font-weight:bold; min-width:60px; }
+.cfr-scaling-label.unc { color:#f1c40f; }
+.cfr-scaling-progress  { flex:1; background:#333; border-radius:4px; height:6px; overflow:hidden; }
+.cfr-scaling-fill      { height:100%; background:linear-gradient(90deg,#2ecc71,#27ae60); transition:width 0.3s; }
+.cfr-scaling-fill.unc  { background:linear-gradient(90deg,#f1c40f,#e67e22); }
+.cfr-scaling-xp        { font-size:10px; color:#2ecc71; min-width:60px; text-align:right; }
+
+/* Settings inputs */
+.cfr-settings-section { padding: 5px 0; }
+.cfr-input-row {
+    display: flex;
+    align-items: center;
+    gap: 10px;
+    margin: 8px 0;
+}
+.cfr-input-row label { color:#ccc; font-size:12px; min-width:110px; }
+.cfr-input-row input[type="number"],
+.cfr-input-row input[type="text"] {
+    flex: 1;
+    padding: 4px 8px;
+    border: 1px solid #444;
+    border-radius: 4px;
+    background: #222;
+    color: #fff;
+    font-size: 12px;
+}
+.cfr-input-row input[type="number"] { max-width: 80px; }
+
+/* Action buttons */
+.cfr-actions { margin: 10px 0; }
+.cfr-btn-row { display: flex; gap: 8px; margin-top: 6px; }
+.cfr-btn-row .menu_button { flex:1; justify-content:center; font-size:12px; }
+
+
+/* ── 2. MANUAL CONTROLS ───────────────────────────────────── */
+
+.cfr-manual-section {
+    margin-top: 12px;
+    border-top: 1px solid #333;
+    padding-top: 10px;
+}
+.cfr-manual-title {
+    font-weight: bold;
+    color: #e94560;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 8px;
+}
+
+/* Tabs for manual control sections */
+.cfr-tabs { display: flex; gap: 4px; margin-bottom: 10px; flex-wrap: wrap; }
+.cfr-tab {
+    padding: 4px 10px;
+    font-size: 11px;
+    background: #222;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #aaa;
+    cursor: pointer;
+    transition: all 0.15s;
+}
+.cfr-tab:hover  { border-color: #e94560; color: #fff; }
+.cfr-tab.active { background: rgba(233,69,96,0.2); border-color: #e94560; color: #e94560; }
+
+.cfr-tab-content { display: none; }
+.cfr-tab-content.active { display: block; }
+
+/* Flag checkboxes grid */
+.cfr-flag-grid {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 4px;
+    margin: 6px 0;
+    padding: 6px;
+    background: rgba(0,0,0,0.2);
+    border-radius: 4px;
+}
+.cfr-flag-grid label {
+    display: flex;
+    align-items: center;
+    gap: 5px;
+    font-size: 11px;
+    color: #ccc;
+    cursor: pointer;
+}
+.cfr-flag-grid input[type="checkbox"] { cursor: pointer; }
+
+/* Scaling fields (shown/hidden based on SCALING flag) */
+.cfr-scaling-fields {
+    display: none;
+    padding: 6px;
+    background: rgba(46,204,113,0.05);
+    border: 1px solid rgba(46,204,113,0.2);
+    border-radius: 4px;
+    margin-top: 6px;
+}
+.cfr-scaling-fields.visible { display: block; }
+
+/* Textarea for import/export */
+.cfr-json-area {
+    width: 100%;
+    height: 100px;
+    background: #111;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #2ecc71;
+    font-family: monospace;
+    font-size: 10px;
+    padding: 6px;
+    resize: vertical;
+    box-sizing: border-box;
+    margin-top: 6px;
+}
+
+/* Form fields */
+.cfr-form-field {
+    margin-bottom: 6px;
+}
+.cfr-form-field label {
+    display: block;
+    font-size: 11px;
+    color: #aaa;
+    margin-bottom: 3px;
+}
+.cfr-form-field input[type="text"],
+.cfr-form-field input[type="number"],
+.cfr-form-field textarea,
+.cfr-form-field select {
+    width: 100%;
+    padding: 5px 8px;
+    background: #222;
+    border: 1px solid #444;
+    border-radius: 4px;
+    color: #fff;
+    font-size: 12px;
+    box-sizing: border-box;
+}
+.cfr-form-field textarea {
+    height: 55px;
+    resize: vertical;
+    font-family: inherit;
+}
+.cfr-form-field select option { background: #222; }
+
+.cfr-status-msg {
+    font-size: 11px;
+    padding: 4px 8px;
+    border-radius: 4px;
+    margin-top: 6px;
+    display: none;
+}
+.cfr-status-msg.ok  { background: rgba(46,204,113,0.15); color: #2ecc71; display: block; }
+.cfr-status-msg.err { background: rgba(231,76,60,0.15);  color: #e74c3c; display: block; }
+
+
+/* ── 3. HUD FLOATING PANEL ────────────────────────────────── */
+
+#cfr-hud {
+    position: fixed;
+    top: 0; right: 0;
+    width: 340px;
+    height: 100%; height: 100dvh;
+    background: rgba(16, 18, 36, 0.97);
+    border-left: 2px solid #e94560;
+    z-index: 2000;
+    display: flex;
+    flex-direction: column;
+    font-family: 'Segoe UI', Tahoma, sans-serif;
+    color: #eee;
+    box-shadow: -5px 0 20px rgba(0,0,0,0.6);
+    backdrop-filter: blur(6px);
+    transition: transform 0.3s ease;
+    pointer-events: all;
+}
+#cfr-hud.hidden {
+    transform: translateX(100%);
+    pointer-events: none; /* CRITICAL: don't block ST controls when hidden */
+}
+
+@media (max-width: 500px) {
+    #cfr-hud { width: 100%; border-left: none; }
+}
+
+.cfr-hud-header {
+    padding: 12px 15px;
+    background: #0e1028;
+    text-align: center;
+    border-bottom: 1px solid #e94560;
+    flex-shrink: 0;
+}
+.cfr-hud-title {
+    margin: 0;
+    color: #ffd700;
+    font-size: 16px;
+    text-transform: uppercase;
+    letter-spacing: 3px;
+    font-weight: bold;
+    text-shadow: 0 0 12px rgba(255,215,0,0.4);
+}
+.cfr-hud-sub { font-size: 10px; color: #555; margin-top: 2px; }
+
+.cfr-hud-cp {
+    display: flex;
+    justify-content: space-around;
+    padding: 12px 15px;
+    background: rgba(0,0,0,0.3);
+    border-bottom: 1px solid #1a1a2e;
+    flex-shrink: 0;
+}
+.cfr-hud-cp-box { text-align: center; }
+.cfr-hud-cp-label { font-size: 9px; color: #666; text-transform: uppercase; letter-spacing: 1px; }
+.cfr-hud-cp-val   { font-size: 24px; color: #ffd700; font-weight: bold; line-height: 1.2; }
+
+.cfr-hud-meters {
+    padding: 10px 15px;
+    display: flex;
+    flex-direction: column;
+    gap: 8px;
+    flex-shrink: 0;
+    border-bottom: 1px solid #1a1a2e;
+}
+.cfr-hud-meter-row { display: flex; align-items: center; gap: 8px; font-size: 11px; }
+.cfr-hud-meter-label { width: 75px; font-weight: bold; }
+.cfr-hud-meter-track { flex:1; height:7px; background:#222; border-radius:3px; overflow:hidden; }
+.cfr-hud-meter-fill  { height:100%; transition:width 0.5s; border-radius:3px; }
+.cfr-hud-meter-val   { min-width: 36px; text-align: right; font-size: 10px; color: #777; }
+
+#cfr-hud-pending {
+    margin: 8px 15px 0;
+    flex-shrink: 0;
+}
+
+.cfr-hud-perks {
+    flex: 1;
+    overflow-y: auto;
+    padding: 10px 15px 20px;
+}
+.cfr-hud-perks-title {
+    font-size: 11px;
+    color: #e94560;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    border-bottom: 1px solid #2a1a1e;
+    padding-bottom: 5px;
+    margin-bottom: 8px;
+}
+
+.cfr-hud-perk-card {
+    background: rgba(255,255,255,0.04);
+    border-left: 3px solid #444;
+    padding: 8px 10px;
+    margin-bottom: 7px;
+    border-radius: 0 4px 4px 0;
+    font-size: 12px;
+}
+.cfr-hud-perk-card.active { border-left-color: #2ecc71; background: rgba(46,204,113,0.04); }
+.cfr-hud-perk-card.inactive{ opacity: 0.45; }
+
+.cfr-hud-perk-head {
+    display: flex;
+    justify-content: space-between;
+    font-weight: bold;
+    font-size: 12px;
+    margin-bottom: 4px;
+}
+.cfr-hud-perk-cost { color: #ffd700; font-size: 10px; }
+.cfr-hud-perk-desc { font-size: 10px; color: #888; font-style: italic; line-height: 1.3; margin-top: 3px; }
+
+.cfr-hud-flag {
+    display: inline-block;
+    font-size: 9px;
+    padding: 1px 5px;
+    background: #1a1a2e;
+    border-radius: 3px;
+    color: #777;
+    margin: 2px 2px 0 0;
+}
+.cfr-hud-flag.active-flag { color: #2ecc71; }
+
+.cfr-hud-sync {
+    padding: 4px 15px;
+    font-size: 10px;
+    color: #333;
+    text-align: right;
+    flex-shrink: 0;
+    border-top: 1px solid #0e1028;
+}
+.cfr-hud-sync.live  { color: #2ecc71; }
+.cfr-hud-sync.stale { color: #f1c40f; }
+
+/* HUD toggle button */
+#cfr-hud-btn {
+    position: fixed;
+    top: 10px; right: 20px;
+    width: 38px; height: 38px;
+    background: #16213e;
+    border: 2px solid #e94560;
+    border-radius: 50%;
+    color: #ffd700;
+    display: flex;
+    justify-content: center;
+    align-items: center;
+    font-size: 18px;
+    cursor: grab;
+    z-index: 2001;
+    box-shadow: 0 0 12px rgba(0,0,0,0.5);
+    transition: background 0.2s, transform 0.1s;
+    touch-action: none;
+    user-select: none;
+}
+#cfr-hud-btn:active  { cursor: grabbing; transform: scale(0.93); }
+#cfr-hud-btn:hover   { background: #23345c; }
+#cfr-hud-btn.open    { right: 350px; }
+
+@media (max-width: 500px) {
+    #cfr-hud-btn.open { right: calc(100% - 48px); }
+}
+
+
+/* ── 4. IN-CHAT DETAILS INJECTION ────────────────────────── */
+
+.cfr-details-block {
+    margin: 8px 0 2px;
+    border: 1px solid #2a1a2e;
+    border-radius: 6px;
+    background: rgba(16,16,36,0.7);
+    font-size: 12px;
+    overflow: hidden;
+}
+
+.cfr-details-block summary {
+    padding: 6px 12px;
+    cursor: pointer;
+    color: #e94560;
+    font-size: 11px;
+    font-weight: bold;
+    letter-spacing: 0.5px;
+    list-style: none;
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    user-select: none;
+}
+.cfr-details-block summary::-webkit-details-marker { display: none; }
+.cfr-details-block summary::before {
+    content: '▸';
+    color: #e94560;
+    transition: transform 0.2s;
+    font-size: 10px;
+}
+.cfr-details-block[open] summary::before { transform: rotate(90deg); }
+
+.cfr-details-body {
+    padding: 8px 12px 10px;
+    border-top: 1px solid #2a1a2e;
+}
+
+.cfr-details-stats {
+    display: flex;
+    gap: 16px;
+    flex-wrap: wrap;
+    margin-bottom: 8px;
+    font-size: 11px;
+    color: #aaa;
+}
+.cfr-details-stats span { color: #ffd700; font-weight: bold; }
+
+.cfr-details-bar-row {
+    display: flex;
+    align-items: center;
+    gap: 8px;
+    margin-bottom: 4px;
+    font-size: 10px;
+}
+.cfr-details-bar-label { color:#888; width:65px; }
+.cfr-details-bar-track { flex:1; height:5px; background:#222; border-radius:3px; overflow:hidden; }
+.cfr-details-bar-fill  { height:100%; border-radius:3px; }
+.cfr-details-bar-val   { min-width:40px; text-align:right; color:#777; }
+
+.cfr-details-perks { margin-top: 8px; }
+.cfr-details-perks-title {
+    font-size: 10px;
+    color: #555;
+    text-transform: uppercase;
+    letter-spacing: 1px;
+    margin-bottom: 5px;
+}
+
+.cfr-detail-perk {
+    padding: 4px 8px;
+    margin-bottom: 4px;
+    border-left: 2px solid #333;
+    font-size: 11px;
+    color: #ccc;
+    display: flex;
+    flex-wrap: wrap;
+    align-items: baseline;
+    gap: 5px;
+}
+.cfr-detail-perk.perk-active { border-left-color: #2ecc71; }
+.cfr-detail-perk.perk-off    { border-left-color: #666; opacity: 0.5; }
+
+.cfr-detail-perk-name  { color: #fff; font-weight: bold; }
+.cfr-detail-perk-cost  { color: #ffd700; font-size: 10px; }
+.cfr-detail-perk-level { color: #2ecc71; font-size: 10px; }
+.cfr-detail-perk-xp    { color: #888; font-size: 10px; }
+.cfr-detail-perk-state { font-size: 10px; }
+.cfr-detail-perk-state.on  { color: #2ecc71; }
+.cfr-detail-perk-state.off { color: #666; }
+
+.cfr-detail-pending {
+    margin-top: 7px;
+    padding: 4px 8px;
+    border: 1px dashed #f1c40f44;
+    border-radius: 4px;
+    font-size: 10px;
+    color: #f1c40f;
+}
+
+
+/* ── 5. FORGE BLOCK HIDING ────────────────────────────────── */
+
+/* Hide raw forge JSON blocks in chat — replaces SimTracker's hide feature */
+.cfr-forge-hidden {
+    display: none !important;
+}
