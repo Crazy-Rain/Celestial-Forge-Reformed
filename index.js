@@ -225,15 +225,16 @@ class CelestialForgeTracker {
             : [];
         const hasScaling = flags.includes('SCALING') || !!data.scaling;
         return {
-            name:        (data.name || 'Unknown').trim(),
-            cost:        parseInt(data.cost) || 0,
+            name:               (data.name || 'Unknown').trim(),
+            cost:               parseInt(data.cost) || 0,
             flags,
-            description: data.description || '',
-            toggleable:  flags.includes('TOGGLEABLE'),
-            active:      data.active !== false,
-            scaling:     hasScaling ? this.makeScaling(data) : null,
-            acquired_at: data.acquired_at || Date.now(),
-            acquired_response: data.acquired_response || this.state.response_count
+            description:        data.description || '',
+            scaling_description:data.scaling_description || null,
+            toggleable:         flags.includes('TOGGLEABLE'),
+            active:             data.active !== false,
+            scaling:            hasScaling ? this.makeScaling(data) : null,
+            acquired_at:        data.acquired_at || Date.now(),
+            acquired_response:  data.acquired_response || this.state.response_count
         };
     }
 
@@ -977,16 +978,17 @@ async function dbAddPerk(constellationKey, perkData) {
 
     const tier = cfrTierFromCost(perkData.cost);
     cfrPerkDB.constellations[constellationKey].perks.push({
-        id:           `${constellationKey.toLowerCase()}_${Date.now()}`,
-        name:         perkData.name,
-        cost:         perkData.cost,
+        id:                 `${constellationKey.toLowerCase()}_${Date.now()}`,
+        name:               perkData.name,
+        cost:               perkData.cost,
         tier,
-        tier_label:   CFR_TIER_LABELS[tier] || '',
-        flags:        perkData.flags || [],
-        description:  perkData.description || '',
-        times_rolled: 0,
-        created_at:   new Date().toISOString(),
-        source:       perkData.source || 'generation'
+        tier_label:         CFR_TIER_LABELS[tier] || '',
+        flags:              perkData.flags || [],
+        description:        perkData.description || '',
+        scaling_description:perkData.scaling_description || null,
+        times_rolled:       0,
+        created_at:         new Date().toISOString(),
+        source:             perkData.source || 'generation'
     });
 
     await gistSaveDB();
@@ -1026,24 +1028,53 @@ function buildCreationPrompt(constellationKey, tier) {
     const theme     = constData?.theme || '';
     const existing  = (constData?.perks || []).map(p => p.name).join(', ') || 'none yet';
     const tierLabel = CFR_TIER_LABELS[tier] || 'Expert';
-    const cpRange   = tier <= 1 ? '50–100' : tier === 2 ? '100–200' : tier === 3 ? '200–350' : tier === 4 ? '350–500' : tier === 5 ? '500–700' : '700–1000';
+    const cpRanges  = ['','50-100','100-200','200-350','350-500','500-700','700-1000'];
+    const cpRange   = cpRanges[tier] || '200-350';
     const parasMin  = cfrDescParas(tier);
     const available = cfrTracker?.state?.available_cp || 0;
+    const descReq   = parasMin === 1
+        ? 'at least 1 full paragraph'
+        : parasMin === 2 ? '2 to 3 full paragraphs' : '3 full paragraphs';
 
-    return `[CELESTIAL FORGE — CREATION ROLL]
-Generate a new Tier ${tier} (${tierLabel}) perk for the ${label} constellation.
-Theme: ${theme}
-CP Cost: ${cpRange} (player has ${available} CP available)
+    return `[CELESTIAL FORGE - CREATION ROLL - EXECUTE THIS BEFORE ALL ELSE]
+A Celestial Forge Creation Roll has been triggered. YOUR FIRST PRIORITY in this response is to generate the perk below, weaving it naturally into the narrative. Do not skip or defer this step.
 
-FORMAT YOUR RESPONSE AS:
-**PERK NAME** (X CP) [FLAG1, FLAG2]
+CONSTELLATION: ${label}
+DOMAIN THEME: ${theme}
+TIER: ${tier} - ${tierLabel}
+CP COST RANGE: ${cpRange} CP
+PLAYER CURRENT CP: ${available}
 
-Description: Write ${parasMin === 1 ? 'at least 1 paragraph' : parasMin === 2 ? '2–3 paragraphs' : '3 paragraphs'} describing the perk's effect in detail. Simple, focused perks may use 1 paragraph. Complex or high-tier perks should use 2–3 paragraphs to fully capture the ability, its nuances, limitations, and narrative flavour.
+MANDATORY OUTPUT FORMAT:
+Your perk header MUST appear on its own line in EXACTLY this format:
+**[Perk Name]** (X CP) [FLAG1, FLAG2, FLAG3]
 
-Do NOT duplicate any of these existing ${label} perks: ${existing}
+CORRECT EXAMPLE:
+**Ember Heart** (250 CP) [PASSIVE, SCALING, CORRUPTING]
 
-After your narrative description, output a forge block with the new perk included in the full current state.
-[END CREATION ROLL PROMPT]`;
+WRONG (do not do this):
+**PERK NAME:** Ember Heart (250 CP) [PASSIVE, SCALING, CORRUPTING]
+
+The perk name must be the bolded text itself, not a label. Cost in parentheses, flags in square brackets, all on one line.
+
+Valid flags: PASSIVE, TOGGLEABLE, ALWAYS-ON, SCALING, UNCAPPED, GAMER, META-SCALING, CORRUPTING, SANITY-TAXING, COMBAT, UTILITY, CRAFTING, MENTAL, PHYSICAL, SELECTIVE
+
+DESCRIPTION: ${descReq} immediately after the header line.
+- Tier 1-2: What the perk does, simply and clearly
+- Tier 3-4: Include nuance, edge cases, costs and drawbacks
+- Tier 5-6: Scope, hard limits, and how it fundamentally changes the character
+
+If the perk has the SCALING flag, add this section after the description:
+SCALING:
+1-3: [What the perk does at beginner mastery]
+4-6: [What it does at journeyman mastery]
+7-9: [What it does at expert mastery]
+10: [What it does at apex mastery]
+
+Do NOT duplicate existing ${label} perks: ${existing}
+
+After the perk, output an updated forge block with the perk in pending_perk (unaffordable) or perks array (affordable).
+[END CREATION ROLL]`;
 }
 
 // Trigger a forge roll — picks from DB
@@ -1100,28 +1131,62 @@ async function finalizeCreationRoll(text) {
         }
     } catch(e) {}
 
-    // Parse the generated perk from the AI response
-    const perkMatch = text.match(/\*\*([^*]+?)\*\*\s*\((\d+)\s*CP\)\s*\[([^\]]*)\]/);
-    if (!perkMatch) {
-        console.warn('[CFR] Creation roll: could not parse perk from AI response');
-        return;
+    let perk = null;
+
+    // ── Strategy 1: Correct format  **Name** (X CP) [FLAGS]
+    // Anchored to start of line to avoid matching mid-sentence bold text
+    const matchDirect = text.match(/^\*\*([^*:\n]+?)\*\*\s*\((\d+)\s*CP\)\s*\[([^\]]*)\]/m);
+    if (matchDirect) {
+        perk = parsePerkFromMatch(matchDirect, text);
+        console.log('[CFR] Parsed perk via Strategy 1 (direct format)');
     }
 
-    // Parse description — everything after the perk header line
-    const afterHeader  = text.slice(text.indexOf(perkMatch[0]) + perkMatch[0].length).trim();
-    // Remove forge block from description
-    const descRaw      = afterHeader.replace(/```forge[\s\S]*?```/g, '').trim();
-    // Take up to 3 paragraphs
-    const paragraphs   = descRaw.split(/\n\n+/).filter(p => p.trim().length > 20).slice(0, 3);
-    const description  = paragraphs.join('\n\n').trim();
+    // ── Strategy 2: Labeled format  **PERK NAME:** Name (X CP) [FLAGS]
+    // AI sometimes treats the format spec as literal field labels
+    if (!perk) {
+        const matchLabeled = text.match(/\*\*PERK\s*NAME[:\s]*\*\*\s*([^(\n]+?)\s*\((\d+)\s*CP\)\s*\[([^\]]*)\]/i);
+        if (matchLabeled) {
+            perk = {
+                name:        matchLabeled[1].trim(),
+                cost:        parseInt(matchLabeled[2]),
+                flags:       matchLabeled[3].split(/[,\s]+/).map(f=>f.trim()).filter(Boolean),
+                description: extractDescription(text, matchLabeled[0]),
+                scaling_description: extractScalingDescription(text),
+                source:      'generation'
+            };
+            console.log('[CFR] Parsed perk via Strategy 2 (labeled format)');
+        }
+    }
 
-    const perk = {
-        name:        perkMatch[1].trim(),
-        cost:        parseInt(perkMatch[2]),
-        flags:       perkMatch[3].split(/[,\s]+/).map(f=>f.trim()).filter(Boolean),
-        description,
-        source:      'generation'
-    };
+    // ── Strategy 3: Forge block fallback
+    // AI wrote a valid forge block — extract pending_perk from it
+    if (!perk) {
+        const forgeMatch = text.match(/```forge\s*([\s\S]*?)```/);
+        if (forgeMatch) {
+            try {
+                const forgeData = JSON.parse(forgeMatch[1].trim());
+                const stats     = forgeData.characters?.[0]?.stats || forgeData;
+                if (stats.pending_perk) {
+                    perk = {
+                        name:        stats.pending_perk,
+                        cost:        stats.pending_cp || 0,
+                        flags:       [],
+                        description: extractDescriptionFromText(text, stats.pending_perk),
+                        source:      'generation'
+                    };
+                    console.log('[CFR] Parsed perk via Strategy 3 (forge block fallback)');
+                }
+            } catch(e) {
+                console.warn('[CFR] Strategy 3 forge parse failed:', e.message);
+            }
+        }
+    }
+
+    if (!perk) {
+        console.warn('[CFR] Creation roll: all parse strategies failed. AI may not have followed format.');
+        showRollToast('Could not parse perk from AI response — check format', true);
+        return;
+    }
 
     cfrActiveRoll = {
         type:               'creation',
@@ -1130,7 +1195,63 @@ async function finalizeCreationRoll(text) {
         constellationLabel: CFR_CONSTELLATIONS[cfrCreationConstellation] || cfrCreationConstellation
     };
 
+    // Open HUD if closed so player sees the result card
+    const hud = document.getElementById('cfr-hud');
+    const btn = document.getElementById('cfr-hud-btn');
+    if (hud && hud.classList.contains('hidden')) {
+        hud.classList.remove('hidden');
+        if (btn) btn.classList.add('open');
+    }
+
     showRollResult(perk, cfrActiveRoll.constellationKey, cfrActiveRoll.constellationLabel, 'creation');
+}
+
+// ── Parse helpers ─────────────────────────────────────────────
+
+function parsePerkFromMatch(match, fullText) {
+    const afterHeader = fullText.slice(fullText.indexOf(match[0]) + match[0].length).trim();
+    return {
+        name:               match[1].trim(),
+        cost:               parseInt(match[2]),
+        flags:              match[3].split(/[,\s]+/).map(f=>f.trim()).filter(Boolean),
+        description:        extractDescription(fullText, match[0]),
+        scaling_description:extractScalingDescription(fullText),
+        source:             'generation'
+    };
+}
+
+function extractDescription(text, headerStr) {
+    const afterHeader = text.slice(text.indexOf(headerStr) + headerStr.length).trim();
+    const withoutForge = afterHeader.replace(/```forge[\s\S]*?```/g, '').trim();
+    // Stop before SCALING: section
+    const scalingIdx = withoutForge.search(/^SCALING:/m);
+    const descText   = scalingIdx > -1 ? withoutForge.slice(0, scalingIdx).trim() : withoutForge;
+    const paragraphs = descText.split(/\n\n+/).filter(p => p.trim().length > 20).slice(0, 3);
+    return paragraphs.join('\n\n').trim();
+}
+
+function extractDescriptionFromText(text, perkName) {
+    // Find description near the perk name mention
+    const nameIdx = text.toLowerCase().indexOf(perkName.toLowerCase());
+    if (nameIdx === -1) return '';
+    const after    = text.slice(nameIdx + perkName.length);
+    const cleaned  = after.replace(/```forge[\s\S]*?```/g, '').trim();
+    const paragraphs = cleaned.split(/\n\n+/).filter(p => p.trim().length > 20).slice(0, 3);
+    return paragraphs.join('\n\n').trim();
+}
+
+function extractScalingDescription(text) {
+    // Look for SCALING: section with tier breakpoints
+    const scalingMatch = text.match(/SCALING:\s*\n([\s\S]*?)(?=\n\n|```forge|$)/);
+    if (!scalingMatch) return null;
+
+    const lines  = scalingMatch[1].split('\n').filter(l => l.trim());
+    const result = {};
+    for (const line of lines) {
+        const m = line.match(/^(\d+(?:-\d+)?):\s*(.+)/);
+        if (m) result[m[1]] = m[2].trim();
+    }
+    return Object.keys(result).length ? result : null;
 }
 
 // Player clicks Acquire
@@ -1454,6 +1575,38 @@ function updatePromptInjection() {
 // Builds the injected text block — concise but complete.
 // The lorebook already explains flag meanings and XP rules,
 // so this block is pure current state, no definitions needed.
+// Returns the appropriate scaling description text for a perk at its current level
+function getCurrentScalingDesc(perk) {
+    const sd = perk.scaling_description;
+    if (!sd || typeof sd !== 'object') return null;
+    const level = perk.scaling?.level || 1;
+
+    // Check exact level match first (e.g. "10")
+    if (sd[String(level)]) return sd[String(level)];
+
+    // Check range keys like "1-3", "4-6", "7-9"
+    for (const [key, val] of Object.entries(sd)) {
+        const rangeMatch = key.match(/^(\d+)-(\d+)$/);
+        if (rangeMatch) {
+            const lo = parseInt(rangeMatch[1]);
+            const hi = parseInt(rangeMatch[2]);
+            if (level >= lo && level <= hi) return val;
+        }
+    }
+
+    // Uncapped — return last/highest range if past all defined tiers
+    const keys = Object.keys(sd).sort((a,b) => {
+        const aNum = parseInt(a.split('-').pop());
+        const bNum = parseInt(b.split('-').pop());
+        return aNum - bNum;
+    });
+    if (keys.length && perk.scaling?.uncapped) {
+        return sd[keys[keys.length - 1]] + ' (further refined beyond apex)';
+    }
+
+    return null;
+}
+
 function buildPromptBlock() {
     if (!cfrTracker) return '';
     const s = cfrTracker.state;
@@ -1479,7 +1632,7 @@ function buildPromptBlock() {
             let entry = `- ${p.name} (${p.cost} CP) [${p.flags.join(', ')}]`;
 
             if (p.scaling) {
-                const maxL = p.scaling.uncapped ? '∞' : p.scaling.maxLevel;
+                const maxL = p.scaling.uncapped ? 'Uncapped' : p.scaling.maxLevel;
                 entry += ` [Level ${p.scaling.level}/${maxL} | ${p.scaling.xp}/${p.scaling.xp_needed} XP]`;
             }
 
@@ -1487,7 +1640,11 @@ function buildPromptBlock() {
                 entry += p.active ? ' [ACTIVE]' : ' [INACTIVE — toggled off]';
             }
 
-            if (p.description) {
+            // Use current-level scaling description if available, otherwise base description
+            const currentDesc = getCurrentScalingDesc(p);
+            if (currentDesc) {
+                entry += `\n    Current effect: ${currentDesc}`;
+            } else if (p.description) {
                 entry += `\n    Effect: ${p.description}`;
             }
 
