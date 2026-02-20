@@ -1153,6 +1153,9 @@ SCALING:
 7-9: [What it does at expert mastery]
 10: [What it does at apex mastery]
 
+If the perk ALSO has the UNCAPPED flag, add one additional line after the SCALING section:
+UNCAPPED: [Describe the diminishing-returns behavior past level 10. What does each additional level refine or extend? This should describe marginal improvement philosophy, not a new tier — e.g. "Each level beyond apex sharpens precision rather than expanding range, narrowing the margin of error toward theoretical perfection" or "Further levels push the upper boundary of effect by roughly 5-10% per level, approaching but never quite reaching an absolute limit."]
+
 Do NOT duplicate existing ${label} perks: ${existing}
 
 After the perk, output an updated forge block with the perk in pending_perk (unaffordable) or perks array (affordable).
@@ -1343,15 +1346,21 @@ function extractScalingDescription(text) {
     const lines  = scalingMatch[1].split('\n').filter(l => l.trim());
     const result = {};
     for (const line of lines) {
-        // Match: **1-3:** text  OR  1-3: text  OR  **10:** text
+        // Match tier ranges: **1-3:** text  OR  1-3: text  OR  **10:** text
         const m = line.match(/^\*{0,2}(\d+(?:-\d+)?):\*{0,2}\s*(.+)/);
         if (m) {
             const key = m[1].trim();
-            // Strip any remaining leading/trailing bold markers from value
             const val = m[2].replace(/^\*+|\*+$/g, '').trim();
             result[key] = val;
         }
     }
+
+    // Also capture dedicated UNCAPPED: line if present anywhere in text
+    const uncappedMatch = text.match(/^\*{0,2}UNCAPPED:\*{0,2}\s*(.+)/m);
+    if (uncappedMatch) {
+        result['uncapped'] = uncappedMatch[1].replace(/^\*+|\*+$/g, '').trim();
+    }
+
     return Object.keys(result).length ? result : null;
 }
 
@@ -1797,14 +1806,26 @@ function getCurrentScalingDesc(perk) {
         }
     }
 
-    // Uncapped — return last/highest range if past all defined tiers
-    const keys = Object.keys(sd).sort((a,b) => {
-        const aNum = parseInt(a.split('-').pop());
-        const bNum = parseInt(b.split('-').pop());
-        return aNum - bNum;
-    });
-    if (keys.length && perk.scaling?.uncapped) {
-        return sd[keys[keys.length - 1]] + ' (further refined beyond apex)';
+    // Past all defined tiers — check for dedicated uncapped key first
+    if (sd['uncapped']) {
+        if (perk.scaling?.uncapped && level > 10) {
+            const levelsOver = level - 10;
+            return `[Level ${level} — ${levelsOver} beyond apex] ` + sd['uncapped'];
+        }
+    }
+
+    // Fallback: use highest defined tier + level context
+    const keys = Object.keys(sd)
+        .filter(k => k !== 'uncapped')
+        .sort((a, b) => {
+            const aNum = parseInt(a.split('-').pop());
+            const bNum = parseInt(b.split('-').pop());
+            return aNum - bNum;
+        });
+
+    if (keys.length && perk.scaling?.uncapped && level > 10) {
+        const levelsOver = level - 10;
+        return `[Level ${level} — ${levelsOver} beyond apex] ` + sd[keys[keys.length - 1]];
     }
 
     return null;
@@ -1849,6 +1870,11 @@ function buildPromptBlock() {
                 entry += `\n    Current effect: ${currentDesc}`;
             } else if (p.description) {
                 entry += `\n    Effect: ${p.description}`;
+            }
+
+            // Surface uncapped philosophy so AI understands beyond-apex behavior
+            if (p.scaling?.uncapped && p.scaling?.level > 10 && p.scaling_description?.uncapped) {
+                entry += `\n    Beyond-apex behavior: ${p.scaling_description.uncapped}`;
             }
 
             lines.push(entry);
