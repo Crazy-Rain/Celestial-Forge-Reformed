@@ -1439,6 +1439,10 @@ function getRollPanelHTML() {
     <button id="cfr-btn-forge-roll" style="flex:1;padding:6px 4px;background:rgba(233,69,96,0.15);border:1px solid #e94560;border-radius:4px;color:#e94560;font-size:11px;cursor:pointer;">📜 Forge Roll</button>
     <button id="cfr-btn-creation-roll" style="flex:1;padding:6px 4px;background:rgba(255,215,0,0.1);border:1px solid #ffd700;border-radius:4px;color:#ffd700;font-size:11px;cursor:pointer;">⚄ Creation Roll</button>
   </div>
+  <div style="display:flex;gap:6px;margin-top:5px;">
+    <button id="cfr-btn-scan-last" style="flex:1;padding:5px 4px;background:rgba(52,152,219,0.12);border:1px solid #3498db;border-radius:4px;color:#3498db;font-size:11px;cursor:pointer;">🔍 Scan Last Message</button>
+    <button id="cfr-btn-scan-forge" style="flex:1;padding:5px 4px;background:rgba(46,204,113,0.1);border:1px solid #2ecc71;border-radius:4px;color:#2ecc71;font-size:11px;cursor:pointer;">⚙ Apply Forge Block</button>
+  </div>
 
   <!-- Roll result card -->
   <div id="cfr-roll-card" style="display:none; margin-top:10px; background:rgba(0,0,0,0.4); border:1px solid #444; border-radius:6px; padding:10px; font-size:12px;">
@@ -1580,6 +1584,87 @@ function updateBankedList() {
     }).join('');
 }
 
+// Manual scan — re-runs full pipeline on the last AI message in ctx.chat
+async function scanLastMessage() {
+    const ctx = SillyTavern.getContext();
+    if (!ctx?.chat?.length) {
+        showRollToast('No messages in chat yet', true);
+        return;
+    }
+
+    // Find last AI message (walk back from end)
+    let targetIdx = -1;
+    for (let i = ctx.chat.length - 1; i >= 0; i--) {
+        if (!ctx.chat[i].is_user) { targetIdx = i; break; }
+    }
+
+    if (targetIdx === -1) {
+        showRollToast('No AI messages found', true);
+        return;
+    }
+
+    const raw = ctx.chat[targetIdx].mes;
+    if (!raw) {
+        showRollToast('Last AI message is empty', true);
+        return;
+    }
+
+    showRollToast('🔍 Scanning last message…');
+    console.log('[CFR] Manual scan — message idx', targetIdx, 'length', raw.length);
+
+    // Run perk detection regardless of awaiting flag
+    const isAwaiting = cfrAwaitingCreation || cfrGetAwaiting();
+    if (isAwaiting) {
+        await finalizeCreationRoll(raw);
+    } else {
+        passivePerkScan(raw);
+    }
+
+    // Also run full response processing (XP, forge block sync, etc.)
+    cfrLastMsgIdx = targetIdx; // update dedup so auto-events don't double-fire
+    cfrTracker.processResponse(raw);
+
+    updateTrackerUI();
+    updateHUD();
+    updatePromptInjection();
+}
+
+// Manual forge-block-only apply — reads the forge JSON and syncs state from it
+function applyLastForgeBlock() {
+    const ctx = SillyTavern.getContext();
+    if (!ctx?.chat?.length) {
+        showRollToast('No messages in chat yet', true);
+        return;
+    }
+
+    // Find last AI message with a forge block
+    let raw = null;
+    for (let i = ctx.chat.length - 1; i >= 0; i--) {
+        if (!ctx.chat[i].is_user && ctx.chat[i].mes?.includes('```forge')) {
+            raw = ctx.chat[i].mes;
+            break;
+        }
+    }
+
+    if (!raw) {
+        showRollToast('No forge block found in recent messages', true);
+        return;
+    }
+
+    const synced = cfrTracker.syncFromForge(raw);
+    if (synced) {
+        updateTrackerUI();
+        updateHUD();
+        updatePromptInjection();
+        showRollToast('✅ Forge block applied — state updated');
+    } else {
+        showRollToast('⚠️ Forge block found but sync failed — check format', true);
+    }
+}
+
+window.scanLastMessage    = scanLastMessage;
+window.applyLastForgeBlock = applyLastForgeBlock;
+
 function bindRollButtons() {
     $('#cfr-btn-forge-roll').on('click', () => {
         const key = $('#cfr-roll-constellation').val() || null;
@@ -1591,6 +1676,9 @@ function bindRollButtons() {
         const tier = parseInt($('#cfr-roll-tier').val()) || null;
         triggerCreationRoll(key, tier);
     });
+
+    $('#cfr-btn-scan-last').on('click', () => scanLastMessage());
+    $('#cfr-btn-scan-forge').on('click', () => applyLastForgeBlock());
 
     $('#cfr-bank-notify-yes').on('click', () => {
         if (!cfrBankNotifyPerk) return;
@@ -2726,17 +2814,32 @@ function passivePerkScan(text) {
 async function onMessageReceived(data) {
     if (!cfrTracker || !cfrSettings?.enabled) return;
 
-    // Index-based dedup
-    const ctx   = SillyTavern.getContext();
-    const idx   = (ctx?.chat?.length ?? 0) - 1;
+    const ctx = SillyTavern.getContext();
+
+    // Index-based dedup — find actual last AI message index
+    const idx = (ctx?.chat?.length ?? 0) - 1;
     if (idx <= cfrLastMsgIdx) return;
     cfrLastMsgIdx = idx;
 
-    const text = typeof data === 'string' ? data
-               : (data?.message || data?.mes || data?.content || '');
-    if (!text) return;
+    // Always prefer raw .mes from chat array — event payloads vary wildly
+    // between ST versions and DOM textContent strips markdown formatting
+    let text = ctx?.chat?.[idx]?.mes || '';
 
-    if (cfrSettings.debug_mode) console.log('[CFR] 📨 Processing message idx', idx);
+    // Fallback chain only if chat array didn't give us text
+    if (!text) {
+        text = typeof data === 'string' ? data
+             : (data?.message || data?.mes || data?.content || '');
+    }
+
+    // Skip user messages
+    if (ctx?.chat?.[idx]?.is_user) return;
+
+    if (!text) {
+        if (cfrSettings.debug_mode) console.warn('[CFR] ⚠️ Empty text at idx', idx);
+        return;
+    }
+
+    if (cfrSettings.debug_mode) console.log('[CFR] 📨 Processing message idx', idx, '— text length:', text.length);
 
     // Check both memory and sessionStorage for awaiting flag
     const isAwaitingRoll = cfrAwaitingCreation || cfrGetAwaiting();
@@ -2795,11 +2898,15 @@ function setupObserver() {
                 // New AI message element added to chat
                 if (node.classList?.contains('mes') && !node.classList.contains('is_user')) {
                     setTimeout(() => {
-                        const text = node.querySelector('.mes_text')?.textContent || '';
-                        if (text) onMessageReceived(text);
+                        // Pull raw text from chat array using the message's data-mesid attribute
+                        // DO NOT use textContent — it strips markdown and breaks all regex parsing
+                        const mesId = parseInt(node.getAttribute('mesid') ?? '-1');
+                        const ctx   = SillyTavern.getContext();
+                        const raw   = (mesId >= 0 && ctx?.chat?.[mesId]?.mes) ? ctx.chat[mesId].mes : null;
+                        if (raw) onMessageReceived(raw);
                         injectDetailsIntoMessage(node);
                         hideForgeBlocks();
-                    }, 200);
+                    }, 500);  // slightly longer delay to ensure chat array is populated
                 }
 
                 // A pre/code block added — might be forge block
