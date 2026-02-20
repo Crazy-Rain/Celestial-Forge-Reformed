@@ -252,10 +252,21 @@ class CelestialForgeTracker {
             this.applyUncapped();
         }
         if (flags.includes('GAMER') || flags.includes('META-SCALING')) {
-            this.state.has_gamer = true;
+            this.applyGamer();
         }
 
         const perk = this.buildPerk(data);
+
+        // If GAMER already active, new perk gets scaling regardless of its flags
+        if (this.state.has_gamer && !perk.scaling) {
+            perk.flags = [...new Set([...perk.flags, 'SCALING'])];
+            perk.scaling = this.makeScaling({});
+        }
+        // If UNCAPPED already active, new scaling perks start uncapped
+        if (this.state.has_uncapped && perk.scaling) {
+            perk.scaling.maxLevel = 999;
+            perk.scaling.uncapped = true;
+        }
 
         // Duplicate guard — never add the same perk name twice
         const duplicate = this.state.acquired_perks.find(p =>
@@ -310,7 +321,7 @@ class CelestialForgeTracker {
             this.applyUncapped();
         }
         if ((flags.includes('GAMER') || flags.includes('META-SCALING')) && !this.state.has_gamer) {
-            this.state.has_gamer = true;
+            this.applyGamer();
         }
 
         const hasScaling = flags.includes('SCALING') || !!updates.scaling || !!perk.scaling;
@@ -484,12 +495,85 @@ class CelestialForgeTracker {
     applyUncapped() {
         this.state.has_uncapped = true;
         for (const p of this.state.acquired_perks) {
+            // If GAMER is also active, ALL perks get scaling (including PASSIVE)
+            // Otherwise only perks already flagged SCALING get the uncap treatment
+            const shouldScale = this.state.has_gamer
+                || p.flags.includes('SCALING')
+                || p.flags.includes('UNCAPPED');
+
+            if (shouldScale && !p.scaling) {
+                // Retroactively add scaling object to perk that lacked one
+                p.flags = [...new Set([...p.flags, 'SCALING'])];
+                p.scaling = this.makeScaling({});
+            }
             if (p.scaling) {
                 p.scaling.maxLevel = 999;
                 p.scaling.uncapped = true;
             }
         }
-        this.log('⚡ UNCAPPED active — all scaling perks unlimited');
+        this.log('⚡ UNCAPPED active — all eligible perks unlimited');
+    }
+
+    // Per-perk scaling override — doesn't touch global flags
+    enablePerkScaling(perkName) {
+        const perk = this.state.acquired_perks.find(p =>
+            p.name.toLowerCase() === perkName.toLowerCase()
+        );
+        if (!perk) return { success: false, reason: 'not_found' };
+        if (perk.scaling) return { success: false, reason: 'already_scaling' };
+
+        perk.flags = [...new Set([...perk.flags, 'SCALING'])];
+        perk.scaling = this.makeScaling({});
+        // Inherit uncapped if globally active
+        if (this.state.has_uncapped) {
+            perk.scaling.maxLevel = 999;
+            perk.scaling.uncapped = true;
+        }
+        this.save();
+        this.broadcast();
+        this.log(`📈 Scaling enabled for: ${perk.name}`);
+        return { success: true };
+    }
+
+    // Per-perk uncap override — adds scaling first if needed, doesn't touch global flags
+    enablePerkUncapped(perkName) {
+        const perk = this.state.acquired_perks.find(p =>
+            p.name.toLowerCase() === perkName.toLowerCase()
+        );
+        if (!perk) return { success: false, reason: 'not_found' };
+
+        // Ensure it has a scaling object first
+        if (!perk.scaling) {
+            perk.flags = [...new Set([...perk.flags, 'SCALING'])];
+            perk.scaling = this.makeScaling({});
+        }
+
+        if (perk.scaling.uncapped) return { success: false, reason: 'already_uncapped' };
+
+        perk.scaling.maxLevel = 999;
+        perk.scaling.uncapped = true;
+        if (!perk.flags.includes('UNCAPPED')) perk.flags.push('UNCAPPED');
+        this.save();
+        this.broadcast();
+        this.log(`∞ Uncapped enabled for: ${perk.name}`);
+        return { success: true };
+    }
+
+    applyGamer() {
+        this.state.has_gamer = true;
+        // Retroactively give ALL acquired perks a scaling object
+        for (const p of this.state.acquired_perks) {
+            if (!p.scaling) {
+                p.flags = [...new Set([...p.flags, 'SCALING'])];
+                p.scaling = this.makeScaling({});
+            }
+            // If UNCAPPED is also active, immediately uncap the new scaling object
+            if (this.state.has_uncapped && p.scaling) {
+                p.scaling.maxLevel = 999;
+                p.scaling.uncapped = true;
+            }
+        }
+        this.log('🎮 GAMER active — all perks can now gain XP and level');
     }
 
     // ── XP / LEVELS ──────────────────────────────────────────
@@ -1809,7 +1893,11 @@ function updateBankedList() {
               <span style="color:#ccc;">${b.name}</span>
               <span style="display:flex;align-items:center;gap:6px;">
                 <span style="color:${color};">${b.cost} CP</span>
-                ${affordable ? `<button onclick="cfrTracker.acquireBanked('${b.name}');updateBankedList();updateHUD();" style="padding:2px 6px;background:rgba(46,204,113,0.15);border:1px solid #2ecc71;border-radius:3px;color:#2ecc71;font-size:9px;cursor:pointer;">Acquire</button>` : ''}
+                ${affordable
+                    ? `<button onclick="cfrTracker.acquireBanked('${b.name}');updateBankedList();updateHUD();updatePromptInjection();" style="padding:2px 6px;background:rgba(46,204,113,0.15);border:1px solid #2ecc71;border-radius:3px;color:#2ecc71;font-size:9px;cursor:pointer;">Purchase</button>`
+                    : `<button disabled title="Need ${b.cost - (cfrTracker?.state?.available_cp||0)} more CP" style="padding:2px 6px;background:rgba(100,100,100,0.08);border:1px solid #333;border-radius:3px;color:#444;font-size:9px;cursor:not-allowed;">Purchase</button>
+                       <span style="font-size:9px;color:#555;">-${b.cost - (cfrTracker?.state?.available_cp||0)} CP</span>`
+                }
                 <button onclick="cfrTracker.discardBanked('${b.name}');updateBankedList();" style="padding:2px 6px;background:rgba(231,76,60,0.1);border:1px solid #e74c3c33;border-radius:3px;color:#e74c3c;font-size:9px;cursor:pointer;">✕</button>
               </span>
             </div>`;
@@ -1911,6 +1999,39 @@ function bindRollButtons() {
 
     $('#cfr-btn-scan-last').on('click', () => scanLastMessage());
     $('#cfr-btn-scan-forge').on('click', () => applyLastForgeBlock());
+
+    // Global modifier buttons
+    $('#cfr-btn-apply-gamer').on('click', () => {
+        if (!cfrTracker) return;
+        if (cfrTracker.state.has_gamer) {
+            showStatus('cfr-global-mod-status', '🎮 GAMER already active', 'ok');
+            return;
+        }
+        cfrTracker.applyGamer();
+        cfrTracker.save();
+        cfrTracker.broadcast();
+        updateTrackerUI();
+        updateHUD();
+        updateGlobalModStatus();
+        updatePromptInjection();
+        showStatus('cfr-global-mod-status', '✅ GAMER activated — all perks now scale', 'ok');
+    });
+
+    $('#cfr-btn-apply-uncapped').on('click', () => {
+        if (!cfrTracker) return;
+        if (cfrTracker.state.has_uncapped) {
+            showStatus('cfr-global-mod-status', '⚡ UNCAPPED already active', 'ok');
+            return;
+        }
+        cfrTracker.applyUncapped();
+        cfrTracker.save();
+        cfrTracker.broadcast();
+        updateTrackerUI();
+        updateHUD();
+        updateGlobalModStatus();
+        updatePromptInjection();
+        showStatus('cfr-global-mod-status', '✅ UNCAPPED activated — all scaling perks unlimited', 'ok');
+    });
 
     // Profile management buttons
     $('#cfr-btn-profile-load').on('click', async () => {
@@ -2302,6 +2423,20 @@ function getCFRSettingsHtml() {
             <div class="cfr-btn-row" style="margin-top:8px;">
               <input type="button" class="menu_button" id="cfr-btn-save-edit" value="💾 Save Changes" />
             </div>
+            <div style="border-top:1px solid #1a1a2e;margin-top:10px;padding-top:8px;">
+              <div style="font-size:10px;color:#888;margin-bottom:6px;text-transform:uppercase;letter-spacing:1px;">Per-Perk Overrides</div>
+              <div style="font-size:10px;color:#555;margin-bottom:7px;line-height:1.4;">
+                Apply scaling/uncapped to this perk only — does not activate global flags.
+              </div>
+              <div class="cfr-btn-row" style="margin-bottom:5px;">
+                <input type="button" class="menu_button" id="cfr-btn-perk-scale" value="📈 Enable Scaling" />
+                <span id="cfr-perk-scale-status" style="font-size:10px;color:#555;margin-left:4px;"></span>
+              </div>
+              <div class="cfr-btn-row">
+                <input type="button" class="menu_button" id="cfr-btn-perk-uncap" value="∞ Remove Level Cap" />
+                <span id="cfr-perk-uncap-status" style="font-size:10px;color:#555;margin-left:4px;"></span>
+              </div>
+            </div>
           </div>
           <div id="cfr-edit-status" class="cfr-status-msg"></div>
         </div>
@@ -2368,6 +2503,32 @@ function getCFRSettingsHtml() {
         </div>
       </div>
 
+      <!-- GLOBAL MODIFIERS -->
+      <div class="cfr-manual-section">
+        <div class="cfr-manual-title">⚡ Global Modifiers</div>
+        <div class="cfr-settings-section">
+          <div style="font-size:11px;color:#888;margin-bottom:6px;line-height:1.4;">
+            Use these when a perk's <em>effect</em> grants GAMER or UNCAPPED globally,
+            but the perk itself isn't flagged with those. Fires retroactively on all current perks.
+          </div>
+          <div id="cfr-global-mod-status" style="font-size:11px;margin-bottom:6px;"></div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
+            <span style="font-size:12px;color:#ccc;">🎮 GAMER active</span>
+            <span id="cfr-gamer-status" style="font-size:11px;color:#555;">inactive</span>
+          </div>
+          <div class="cfr-btn-row" style="margin-bottom:8px;">
+            <input type="button" class="menu_button" id="cfr-btn-apply-gamer" value="Activate GAMER" />
+          </div>
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
+            <span style="font-size:12px;color:#ccc;">⚡ UNCAPPED active</span>
+            <span id="cfr-uncapped-status" style="font-size:11px;color:#555;">inactive</span>
+          </div>
+          <div class="cfr-btn-row">
+            <input type="button" class="menu_button" id="cfr-btn-apply-uncapped" value="Activate UNCAPPED" />
+          </div>
+        </div>
+      </div>
+
       <!-- PROFILES -->
       <div class="cfr-manual-section">
         <div class="cfr-manual-title">📋 Profiles</div>
@@ -2403,6 +2564,20 @@ function getCFRSettingsHtml() {
 // ============================================================
 //  TRACKER DRAWER UI UPDATE
 // ============================================================
+
+function updateGlobalModStatus() {
+    if (!cfrTracker) return;
+    const gamerEl   = document.getElementById('cfr-gamer-status');
+    const uncapEl   = document.getElementById('cfr-uncapped-status');
+    if (gamerEl) {
+        gamerEl.textContent = cfrTracker.state.has_gamer ? 'ACTIVE' : 'inactive';
+        gamerEl.style.color = cfrTracker.state.has_gamer ? '#2ecc71' : '#555';
+    }
+    if (uncapEl) {
+        uncapEl.textContent = cfrTracker.state.has_uncapped ? 'ACTIVE' : 'inactive';
+        uncapEl.style.color = cfrTracker.state.has_uncapped ? '#e94560' : '#555';
+    }
+}
 
 function updateTrackerUI() {
     if (!cfrTracker) return;
@@ -2493,6 +2668,7 @@ function updateTrackerUI() {
 
     // Populate dropdowns for manual controls
     populatePerkDropdowns();
+    updateGlobalModStatus();
 }
 
 
@@ -2946,6 +3122,8 @@ function bindManualControls() {
         }
 
         $('#cfr-edit-form').show();
+        // Update per-perk override status indicators
+        refreshPerkOverrideStatus(perk);
     });
 
     // Show/hide scaling on flag toggle
@@ -2981,6 +3159,57 @@ function bindManualControls() {
         }
     });
 
+    // ── PER-PERK OVERRIDES ──
+    $('#cfr-btn-perk-scale').on('click', () => {
+        const name = $('#cfr-edit-select').val();
+        if (!name) { showStatus('cfr-edit-status', '⚠️ Select a perk first', 'err'); return; }
+        const result = cfrTracker.enablePerkScaling(name);
+        if (result.success) {
+            const perk = cfrTracker.state.acquired_perks.find(p => p.name === name);
+            refreshPerkOverrideStatus(perk);
+            // Tick SCALING checkbox in form so user sees it reflected
+            $('#cfr-edit-flags input[value="SCALING"]').prop('checked', true);
+            $('#cfr-edit-scaling-fields').addClass('visible');
+            if (perk?.scaling) {
+                $('#cfr-edit-level').val(perk.scaling.level);
+                $('#cfr-edit-xp').val(perk.scaling.xp);
+            }
+            updateTrackerUI();
+            updateHUD();
+            updatePromptInjection();
+            showStatus('cfr-edit-status', `✅ Scaling enabled for "${name}"`, 'ok');
+        } else if (result.reason === 'already_scaling') {
+            showStatus('cfr-edit-status', `"${name}" already has scaling`, 'ok');
+        } else {
+            showStatus('cfr-edit-status', `⚠️ ${result.reason}`, 'err');
+        }
+    });
+
+    $('#cfr-btn-perk-uncap').on('click', () => {
+        const name = $('#cfr-edit-select').val();
+        if (!name) { showStatus('cfr-edit-status', '⚠️ Select a perk first', 'err'); return; }
+        const result = cfrTracker.enablePerkUncapped(name);
+        if (result.success) {
+            const perk = cfrTracker.state.acquired_perks.find(p => p.name === name);
+            refreshPerkOverrideStatus(perk);
+            $('#cfr-edit-flags input[value="SCALING"]').prop('checked', true);
+            $('#cfr-edit-flags input[value="UNCAPPED"]').prop('checked', true);
+            $('#cfr-edit-scaling-fields').addClass('visible');
+            if (perk?.scaling) {
+                $('#cfr-edit-level').val(perk.scaling.level);
+                $('#cfr-edit-xp').val(perk.scaling.xp);
+            }
+            updateTrackerUI();
+            updateHUD();
+            updatePromptInjection();
+            showStatus('cfr-edit-status', `✅ Level cap removed for "${name}"`, 'ok');
+        } else if (result.reason === 'already_uncapped') {
+            showStatus('cfr-edit-status', `"${name}" is already uncapped`, 'ok');
+        } else {
+            showStatus('cfr-edit-status', `⚠️ ${result.reason}`, 'err');
+        }
+    });
+
     // ── REMOVE TAB ──
     $('#cfr-btn-remove-perk').on('click', () => {
         const name = $('#cfr-remove-select').val();
@@ -3007,6 +3236,28 @@ function bindManualControls() {
             result.success ? '✅ State imported successfully' : `⚠️ Parse error: ${result.error}`,
             result.success ? 'ok' : 'err');
     });
+}
+
+// Updates the status spans next to the per-perk override buttons
+function refreshPerkOverrideStatus(perk) {
+    const scaleEl = document.getElementById('cfr-perk-scale-status');
+    const uncapEl = document.getElementById('cfr-perk-uncap-status');
+    if (!perk) {
+        if (scaleEl) { scaleEl.textContent = ''; }
+        if (uncapEl) { uncapEl.textContent = ''; }
+        return;
+    }
+
+    if (scaleEl) {
+        const hasScale = !!perk.scaling || perk.flags.includes('SCALING');
+        scaleEl.textContent  = hasScale ? '✓ active' : '';
+        scaleEl.style.color  = hasScale ? '#2ecc71'  : '#555';
+    }
+    if (uncapEl) {
+        const isUncap = perk.scaling?.uncapped || perk.flags.includes('UNCAPPED');
+        uncapEl.textContent  = isUncap ? '✓ active' : '';
+        uncapEl.style.color  = isUncap ? '#e94560'  : '#555';
+    }
 }
 
 function bindExtensionSettings() {
