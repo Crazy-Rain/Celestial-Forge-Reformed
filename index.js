@@ -34,7 +34,8 @@ const CFR_DEFAULTS = {
     hide_forge_blocks:     true,
     gist_id:               '',
     gist_pat:              '',
-    bank_max:              10
+    bank_max:              10,
+    active_profile:        'default'
 };
 
 // Constellation display names (key → label)
@@ -885,10 +886,47 @@ ${perks || '(none)'}${this.state.pending_perk ? `\nPENDING: ${this.state.pending
 // ============================================================
 
 const CFR_GIST_DB_FILE    = 'cfr-perk-database.json';
-const CFR_GIST_STATE_FILE = 'cfr-character-state.json';
+const CFR_LEGACY_STATE    = 'cfr-character-state.json'; // backward compat only
 
-let cfrPerkDB = null;       // in-memory perk database
-let cfrGistFileShas = {};   // file SHAs needed for Gist PATCH
+let cfrPerkDB       = null; // in-memory perk database
+let cfrGistFileList = {};   // { filename: raw_url } populated on gistLoad
+let cfrProfileList  = [];   // ['default', 'branch-lungfight', ...] populated on gistLoad
+
+// ── Profile filename helpers ──────────────────────────────────
+
+function getStateFilename(profileName) {
+    return `cfr-state-${sanitizeProfileName(profileName)}.json`;
+}
+
+function sanitizeProfileName(name) {
+    return (name || 'default')
+        .trim()
+        .toLowerCase()
+        .replace(/\s+/g, '-')
+        .replace(/[^a-z0-9-]/g, '')
+        .slice(0, 40) || 'default';
+}
+
+function getActiveProfile() {
+    return cfrSettings?.active_profile || 'default';
+}
+
+function setActiveProfile(name) {
+    if (!cfrSettings) return;
+    cfrSettings.active_profile = sanitizeProfileName(name);
+    cfrSaveDebounced?.();
+    updateProfileUI();
+}
+
+function listProfiles(gistData) {
+    const files = Object.keys(gistData?.files || {});
+    const profiles = files
+        .filter(f => f.startsWith('cfr-state-') && f.endsWith('.json'))
+        .map(f => f.replace('cfr-state-', '').replace('.json', ''));
+    // Always include 'default' even if file doesn't exist yet
+    if (!profiles.includes('default')) profiles.unshift('default');
+    return profiles;
+}
 
 function gistHeaders() {
     return {
@@ -898,7 +936,10 @@ function gistHeaders() {
     };
 }
 
-async function gistLoad() {
+
+// ── LOAD ─────────────────────────────────────────────────────
+
+async function gistLoad(profileNameOverride) {
     const id  = cfrSettings?.gist_id;
     const pat = cfrSettings?.gist_pat;
     if (!id || !pat) {
@@ -912,35 +953,109 @@ async function gistLoad() {
         if (!res.ok) throw new Error(`Gist fetch failed: ${res.status}`);
         const data = await res.json();
 
-        // Store SHAs so we can update files individually
+        // Cache file list
+        cfrGistFileList = {};
         for (const [name, file] of Object.entries(data.files || {})) {
-            cfrGistFileShas[name] = file.raw_url;
+            cfrGistFileList[name] = file.raw_url;
         }
 
+        // Build profile list from filenames
+        cfrProfileList = listProfiles(data);
+        updateProfileUI();
+
         // Load perk database
-        if (data.files[CFR_GIST_DB_FILE]) {
-            const dbRes = await fetch(data.files[CFR_GIST_DB_FILE].raw_url);
+        if (cfrGistFileList[CFR_GIST_DB_FILE]) {
+            const dbRes = await fetch(cfrGistFileList[CFR_GIST_DB_FILE]);
             cfrPerkDB   = await dbRes.json();
         } else {
             cfrPerkDB = buildEmptyDB();
         }
 
-        // Load character state (overrides localStorage if present)
-        if (data.files[CFR_GIST_STATE_FILE] && cfrTracker) {
-            const stRes   = await fetch(data.files[CFR_GIST_STATE_FILE].raw_url);
-            const stData  = await stRes.json();
-            if (stData.state) {
+        // Determine which profile file to load
+        const targetProfile = sanitizeProfileName(profileNameOverride || getActiveProfile());
+        const targetFile    = getStateFilename(targetProfile);
+
+        let stateLoaded = false;
+
+        if (cfrGistFileList[targetFile]) {
+            const stRes  = await fetch(cfrGistFileList[targetFile]);
+            const stData = await stRes.json();
+            if (stData.state && cfrTracker) {
                 cfrTracker.state = { ...cfrTracker.defaultState(), ...stData.state };
                 cfrTracker.calcTotals();
+                stateLoaded = true;
+                console.log(`[CFR] ✅ Profile loaded: ${targetProfile}`);
             }
         }
 
-        console.log('[CFR] ✅ Gist loaded successfully');
+        // Backward compat — old cfr-character-state.json as fallback for default profile
+        if (!stateLoaded && targetProfile === 'default' && cfrGistFileList[CFR_LEGACY_STATE]) {
+            console.log('[CFR] Migrating legacy cfr-character-state.json → cfr-state-default.json');
+            const stRes  = await fetch(cfrGistFileList[CFR_LEGACY_STATE]);
+            const stData = await stRes.json();
+            if (stData.state && cfrTracker) {
+                cfrTracker.state = { ...cfrTracker.defaultState(), ...stData.state };
+                cfrTracker.calcTotals();
+                stateLoaded = true;
+                // Write migrated state under new filename
+                await gistSaveState('default');
+            }
+        }
+
+        if (!stateLoaded) {
+            console.log(`[CFR] No saved state for profile '${targetProfile}' — starting fresh`);
+        }
+
+        if (profileNameOverride) setActiveProfile(profileNameOverride);
+        console.log('[CFR] ✅ Gist load complete');
+
     } catch(e) {
         console.error('[CFR] Gist load failed:', e);
         if (!cfrPerkDB) cfrPerkDB = buildEmptyDB();
     }
 }
+
+
+// ── SAVE STATE ───────────────────────────────────────────────
+
+async function gistSaveState(profileNameOverride) {
+    const id  = cfrSettings?.gist_id;
+    const pat = cfrSettings?.gist_pat;
+    if (!id || !pat || !cfrTracker) return;
+
+    const profileName = sanitizeProfileName(profileNameOverride || getActiveProfile());
+    const filename    = getStateFilename(profileName);
+
+    try {
+        await fetch(`https://api.github.com/gists/${id}`, {
+            method:  'PATCH',
+            headers: gistHeaders(),
+            body:    JSON.stringify({
+                files: {
+                    [filename]: {
+                        content: JSON.stringify({
+                            version:      '1.0.0',
+                            profile_name: profileName,
+                            last_updated: new Date().toISOString(),
+                            state:        cfrTracker.state
+                        }, null, 2)
+                    }
+                }
+            })
+        });
+        // Keep local profile list in sync
+        if (!cfrProfileList.includes(profileName)) {
+            cfrProfileList.push(profileName);
+            updateProfileUI();
+        }
+        if (cfrSettings?.debug_mode) console.log(`[CFR] 📤 State saved: profile '${profileName}'`);
+    } catch(e) {
+        console.error('[CFR] Gist state save failed:', e);
+    }
+}
+
+
+// ── SAVE DB ──────────────────────────────────────────────────
 
 async function gistSaveDB() {
     const id  = cfrSettings?.gist_id;
@@ -967,32 +1082,111 @@ async function gistSaveDB() {
     }
 }
 
-async function gistSaveState() {
+
+// ── PROFILE MANAGEMENT ───────────────────────────────────────
+
+async function createProfile(name) {
+    const clean = sanitizeProfileName(name);
+    if (!clean) return { success: false, reason: 'invalid_name' };
+    if (cfrProfileList.includes(clean)) return { success: false, reason: 'already_exists' };
+
+    await gistSaveState(clean);
+    setActiveProfile(clean);
+    return { success: true, name: clean };
+}
+
+async function loadProfile(name) {
+    const clean = sanitizeProfileName(name);
+    // Save current profile first before switching
+    await gistSaveState(getActiveProfile());
+    // Load new profile from Gist
+    await gistLoad(clean);
+    setActiveProfile(clean);
+    updateTrackerUI();
+    updateHUD();
+    updatePromptInjection();
+    return { success: true, name: clean };
+}
+
+async function duplicateProfile(fromName, toName) {
+    const cleanFrom = sanitizeProfileName(fromName);
+    const cleanTo   = sanitizeProfileName(toName);
+    if (!cleanTo) return { success: false, reason: 'invalid_name' };
+
     const id  = cfrSettings?.gist_id;
     const pat = cfrSettings?.gist_pat;
-    if (!id || !pat || !cfrTracker) return;
+    if (!id || !pat) return { success: false, reason: 'no_gist' };
 
+    const sourceFile = getStateFilename(cleanFrom);
+    const rawUrl     = cfrGistFileList[sourceFile];
+
+    let stateContent;
+    if (rawUrl) {
+        // Read source profile from Gist
+        const res  = await fetch(rawUrl);
+        const data = await res.json();
+        stateContent = {
+            ...data,
+            profile_name: cleanTo,
+            last_updated: new Date().toISOString()
+        };
+    } else {
+        // Source doesn't exist in Gist — use current in-memory state
+        stateContent = {
+            version:      '1.0.0',
+            profile_name: cleanTo,
+            last_updated: new Date().toISOString(),
+            state:        cfrTracker?.state || {}
+        };
+    }
+
+    const destFile = getStateFilename(cleanTo);
     try {
         await fetch(`https://api.github.com/gists/${id}`, {
             method:  'PATCH',
             headers: gistHeaders(),
             body:    JSON.stringify({
                 files: {
-                    [CFR_GIST_STATE_FILE]: {
-                        content: JSON.stringify({
-                            version:        '1.0.0',
-                            character_name: 'Smith',
-                            last_updated:   new Date().toISOString(),
-                            state:          cfrTracker.state
-                        }, null, 2)
+                    [destFile]: {
+                        content: JSON.stringify(stateContent, null, 2)
                     }
                 }
             })
         });
-        if (cfrSettings?.debug_mode) console.log('[CFR] 📤 Character state saved to Gist');
+        if (!cfrProfileList.includes(cleanTo)) cfrProfileList.push(cleanTo);
+        updateProfileUI();
+        return { success: true, name: cleanTo };
     } catch(e) {
-        console.error('[CFR] Gist state save failed:', e);
+        console.error('[CFR] Duplicate profile failed:', e);
+        return { success: false, reason: e.message };
     }
+}
+
+// Note: Gist files can't be truly deleted via PATCH without nulling content,
+// which leaves an empty file. We soft-delete by removing from the local list.
+function removeProfileLocal(name) {
+    const clean = sanitizeProfileName(name);
+    if (clean === 'default') return { success: false, reason: 'cannot_remove_default' };
+    cfrProfileList = cfrProfileList.filter(p => p !== clean);
+    updateProfileUI();
+    if (getActiveProfile() === clean) setActiveProfile('default');
+    return { success: true };
+}
+
+// ── PROFILE UI ───────────────────────────────────────────────
+
+function updateProfileUI() {
+    const sel = document.getElementById('cfr-profile-select');
+    if (!sel) return;
+
+    const current = getActiveProfile();
+    sel.innerHTML = cfrProfileList
+        .map(p => `<option value="${p}" ${p === current ? 'selected' : ''}>${p}</option>`)
+        .join('');
+
+    // Show active profile name in HUD
+    const hudProfile = document.getElementById('cfr-hud-profile');
+    if (hudProfile) hudProfile.textContent = current;
 }
 
 function buildEmptyDB() {
@@ -1718,6 +1912,58 @@ function bindRollButtons() {
     $('#cfr-btn-scan-last').on('click', () => scanLastMessage());
     $('#cfr-btn-scan-forge').on('click', () => applyLastForgeBlock());
 
+    // Profile management buttons
+    $('#cfr-btn-profile-load').on('click', async () => {
+        const sel = $('#cfr-profile-select').val();
+        if (!sel) return;
+        if (!confirm(`Load profile "${sel}"? Unsaved changes to "${getActiveProfile()}" will be saved first.`)) return;
+        showStatus('cfr-profile-status', '📂 Loading…', 'ok');
+        await loadProfile(sel);
+        showStatus('cfr-profile-status', `✅ Profile "${sel}" loaded`, 'ok');
+    });
+
+    $('#cfr-btn-profile-save').on('click', async () => {
+        const active = getActiveProfile();
+        showStatus('cfr-profile-status', '💾 Saving…', 'ok');
+        await gistSaveState(active);
+        showStatus('cfr-profile-status', `✅ Profile "${active}" saved`, 'ok');
+    });
+
+    $('#cfr-btn-profile-new').on('click', async () => {
+        const name = $('#cfr-profile-name-input').val().trim();
+        if (!name) {
+            showStatus('cfr-profile-status', '⚠️ Enter a name for the new profile', 'err');
+            return;
+        }
+        showStatus('cfr-profile-status', '➕ Creating…', 'ok');
+        const result = await createProfile(name);
+        if (result.success) {
+            $('#cfr-profile-name-input').val('');
+            showStatus('cfr-profile-status', `✅ Profile "${result.name}" created and activated`, 'ok');
+        } else if (result.reason === 'already_exists') {
+            showStatus('cfr-profile-status', `⚠️ Profile "${result.name}" already exists — use Duplicate or pick a different name`, 'err');
+        } else {
+            showStatus('cfr-profile-status', `⚠️ ${result.reason}`, 'err');
+        }
+    });
+
+    $('#cfr-btn-profile-dupe').on('click', async () => {
+        const toName = $('#cfr-profile-name-input').val().trim();
+        if (!toName) {
+            showStatus('cfr-profile-status', '⚠️ Enter a name for the duplicate', 'err');
+            return;
+        }
+        const fromName = getActiveProfile();
+        showStatus('cfr-profile-status', `📋 Duplicating "${fromName}"…`, 'ok');
+        const result = await duplicateProfile(fromName, toName);
+        if (result.success) {
+            $('#cfr-profile-name-input').val('');
+            showStatus('cfr-profile-status', `✅ "${fromName}" duplicated as "${result.name}" — switch to it via the selector`, 'ok');
+        } else {
+            showStatus('cfr-profile-status', `⚠️ Duplicate failed: ${result.reason}`, 'err');
+        }
+    });
+
     $('#cfr-bank-notify-yes').on('click', () => {
         if (!cfrBankNotifyPerk) return;
         const result = cfrTracker.acquireBanked(cfrBankNotifyPerk.name);
@@ -2122,6 +2368,32 @@ function getCFRSettingsHtml() {
         </div>
       </div>
 
+      <!-- PROFILES -->
+      <div class="cfr-manual-section">
+        <div class="cfr-manual-title">📋 Profiles</div>
+        <div class="cfr-settings-section">
+          <div class="cfr-form-field">
+            <label>Active Profile</label>
+            <select id="cfr-profile-select" style="width:100%;padding:4px 6px;background:#111;border:1px solid #333;color:#ccc;border-radius:4px;font-size:12px;">
+              <option value="default">default</option>
+            </select>
+          </div>
+          <div class="cfr-btn-row" style="margin-top:5px;">
+            <input type="button" class="menu_button" id="cfr-btn-profile-load"  value="📂 Load" />
+            <input type="button" class="menu_button" id="cfr-btn-profile-save"  value="💾 Save" />
+          </div>
+          <div class="cfr-form-field" style="margin-top:6px;">
+            <label>New / Duplicate name</label>
+            <input type="text" id="cfr-profile-name-input" placeholder="e.g. branch-lungfight" style="font-size:12px;" />
+          </div>
+          <div class="cfr-btn-row" style="margin-top:4px;">
+            <input type="button" class="menu_button" id="cfr-btn-profile-new"   value="➕ New Profile" />
+            <input type="button" class="menu_button" id="cfr-btn-profile-dupe"  value="📋 Duplicate" />
+          </div>
+          <div id="cfr-profile-status" class="cfr-status-msg"></div>
+        </div>
+      </div>
+
     </div>
   </div>
 </div>`;
@@ -2238,6 +2510,7 @@ function injectHUD() {
           <div class="cfr-hud-header">
             <p class="cfr-hud-title">Celestial Forge</p>
             <div class="cfr-hud-sub" id="cfr-hud-sync">waiting…</div>
+            <div class="cfr-hud-sub" id="cfr-hud-profile" style="color:#f1c40f;font-size:9px;margin-top:1px;">profile: default</div>
           </div>
           <div class="cfr-hud-cp">
             <div class="cfr-hud-cp-box">
@@ -2818,6 +3091,7 @@ function loadExtensionSettingsUI() {
     // Pre-fill Gist fields if already configured
     if (cfrSettings.gist_id)  $('#cfr-gist-id').val(cfrSettings.gist_id);
     if (cfrSettings.gist_pat) $('#cfr-gist-pat').val(cfrSettings.gist_pat);
+    updateProfileUI();
 }
 
 
@@ -3069,7 +3343,8 @@ jQuery(async () => {
             updateHUD();
             updateBankedList();
             updatePromptInjection();
-            console.log('[CFR] ☁️ Gist sync complete on init');
+            updateProfileUI();
+        console.log('[CFR] ☁️ Gist sync complete on init');
         }).catch(e => console.warn('[CFR] Gist init load failed:', e));
     } else {
         cfrPerkDB = buildEmptyDB();
