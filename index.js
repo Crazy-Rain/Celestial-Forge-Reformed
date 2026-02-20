@@ -255,6 +255,16 @@ class CelestialForgeTracker {
         }
 
         const perk = this.buildPerk(data);
+
+        // Duplicate guard — never add the same perk name twice
+        const duplicate = this.state.acquired_perks.find(p =>
+            p.name.toLowerCase() === perk.name.toLowerCase()
+        );
+        if (duplicate) {
+            this.log(`⚠️ Skipped duplicate: ${perk.name}`);
+            return { success: false, reason: 'already_acquired', perk: duplicate };
+        }
+
         this.calcTotals();
 
         if (perk.cost <= this.state.available_cp) {
@@ -350,11 +360,12 @@ class CelestialForgeTracker {
     }
 
     removePerk(perkName) {
-        const before = this.state.acquired_perks.length;
-        this.state.acquired_perks = this.state.acquired_perks.filter(p =>
-            p.name.toLowerCase() !== perkName.toLowerCase()
+        // findIndex + splice — removes exactly ONE entry (first match) not all
+        const idx = this.state.acquired_perks.findIndex(p =>
+            p.name.toLowerCase() === perkName.toLowerCase()
         );
-        if (this.state.acquired_perks.length === before) return { success: false, reason: 'not_found' };
+        if (idx === -1) return { success: false, reason: 'not_found' };
+        this.state.acquired_perks.splice(idx, 1);
         this.calcTotals();
         this.save();
         this.broadcast();
@@ -604,7 +615,16 @@ class CelestialForgeTracker {
                 }
                 if (fp.active !== undefined) existing.active = fp.active;
             } else {
-                this.addPerk(fp);
+                // Do NOT auto-add if there is an active roll card showing for this perk.
+                // The player must explicitly Acquire/Bank/Discard from the roll UI.
+                // cfrActiveRoll is a module-level variable set when a roll card is showing.
+                const activeRollName = (typeof cfrActiveRoll !== 'undefined' && cfrActiveRoll?.perk?.name || '').toLowerCase();
+                const fpName         = (fp.name || '').toLowerCase();
+                if (activeRollName && fpName === activeRollName) {
+                    this.log(`⏸️ syncFromForge skipped ${fp.name} — active roll card pending player decision`);
+                } else {
+                    this.addPerk(fp);
+                }
             }
         }
 
@@ -1347,6 +1367,15 @@ async function rollAcquire() {
     const perkWithId = { ...perk, db_id: dbId };
 
     const result = cfrTracker.addPerk(perkWithId);
+
+    if (!result.success && result.reason === 'already_acquired') {
+        // syncFromForge already added it — just confirm to the player
+        showRollToast(`✅ ${perk.name} already on sheet — DB updated`);
+        cfrActiveRoll = null;
+        hideRollCard();
+        checkAndNotifyBank();
+        return;
+    }
 
     if (!result.success && result.reason === 'insufficient_cp') {
         // Auto-bank since they tried to acquire but can't afford
