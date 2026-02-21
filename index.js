@@ -2292,6 +2292,34 @@ function buildPromptBlock() {
 
     lines.push('[END FORGE STATE]');
 
+    // ── MANDATORY OUTPUT INSTRUCTION ─────────────────────────
+    // Appended every time so the AI always knows to include a forge block
+    lines.push('');
+    lines.push('MANDATORY: End EVERY response with an updated forge block in this exact format:');
+    lines.push('```forge');
+    lines.push('{');
+    lines.push('  "characters": [{');
+    lines.push('    "characterName": "<name>",');
+    lines.push('    "currentDateTime": "<in-world date and time>",');
+    lines.push('    "stats": {');
+    lines.push('      "total_cp": <number>,');
+    lines.push('      "available_cp": <number>,');
+    lines.push('      "threshold_progress": <0-100>,');
+    lines.push('      "threshold_max": 100,');
+    lines.push('      "threshold_percent": <0-100>,');
+    lines.push('      "corruption": <0-100>,');
+    lines.push('      "sanity": <0-100>,');
+    lines.push('      "perk_count": <number>,');
+    lines.push('      "perks": [ <current acquired perks array — update xp/level if XP was earned> ],');
+    lines.push('      "pending_perk": "",');
+    lines.push('      "pending_cp": 0,');
+    lines.push('      "pending_remaining": 0');
+    lines.push('    }');
+    lines.push('  }]');
+    lines.push('}');
+    lines.push('```');
+    lines.push('Rules: update threshold_progress by +10 each response. Update perk xp/level if XP lines appear in narrative. Do NOT omit this block — it is required for system tracking.');
+
     return lines.join('\n');
 }
 
