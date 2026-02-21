@@ -888,20 +888,40 @@ ${perks || '(none)'}${this.state.pending_perk ? `\nPENDING: ${this.state.pending
             const key = ctx?.chatId
                 ? `cfr_${ctx.chatId}`
                 : 'cfr_global';
-            localStorage.setItem(key, JSON.stringify(this.state));
+            const blob = JSON.stringify(this.state);
+            localStorage.setItem(key, blob);
+            // Mirror to profile-keyed key — fallback for new chats without a Gist round-trip
+            localStorage.setItem(`cfr_profile_${typeof getActiveProfile === 'function' ? getActiveProfile() : 'default'}`, blob);
         } catch(e) { console.warn('[CFR] Save failed:', e); }
+    }
+
+    // Profile-only save — does NOT write to chatId key
+    // Use this when loading a profile to avoid contaminating the current chat's localStorage entry
+    saveProfileOnly(profileName) {
+        try {
+            const blob = JSON.stringify(this.state);
+            localStorage.setItem(`cfr_profile_${profileName || getActiveProfile?.() || 'default'}`, blob);
+        } catch(e) { console.warn('[CFR] Profile save failed:', e); }
     }
 
     load() {
         try {
             const ctx = SillyTavern.getContext();
+            // Priority: chat-specific → profile-keyed → global fallback
             let raw = ctx?.chatId
                 ? localStorage.getItem(`cfr_${ctx.chatId}`)
                 : null;
+            if (!raw) {
+                const profileKey = `cfr_profile_${getActiveProfile?.() || 'default'}`;
+                raw = localStorage.getItem(profileKey);
+            }
             if (!raw) raw = localStorage.getItem('cfr_global');
             if (raw) {
                 this.state = { ...this.defaultState(), ...JSON.parse(raw) };
                 this.calcTotals();
+                if (this.state.acquired_perks?.length) {
+                    console.log(`[CFR] Loaded ${this.state.acquired_perks.length} perks from localStorage`);
+                }
             }
         } catch(e) { console.warn('[CFR] Load failed:', e); }
         return this.state;
@@ -1132,6 +1152,10 @@ async function gistSaveState(profileNameOverride) {
             cfrProfileList.push(profileName);
             updateProfileUI();
         }
+        // Mirror to localStorage so new-chat loads have a local fallback even without Gist round-trip
+        try {
+            localStorage.setItem(`cfr_profile_${profileName}`, JSON.stringify(cfrTracker.state));
+        } catch(_) {}
         if (cfrSettings?.debug_mode) console.log(`[CFR] 📤 State saved: profile '${profileName}'`);
     } catch(e) {
         console.error('[CFR] Gist state save failed:', e);
@@ -1181,11 +1205,19 @@ async function createProfile(name) {
 
 async function loadProfile(name) {
     const clean = sanitizeProfileName(name);
-    // Save current profile first before switching
+    // Save current profile before switching (Gist only, don't touch chat localStorage)
     await gistSaveState(getActiveProfile());
     // Load new profile from Gist
     await gistLoad(clean);
     setActiveProfile(clean);
+
+    // Write new state to profile localStorage key only — NOT to chatId key
+    // Writing to chatId would contaminate that chat's history with a different profile's data
+    try {
+        const profileKey = `cfr_profile_${clean}`;
+        localStorage.setItem(profileKey, JSON.stringify(cfrTracker.state));
+    } catch(e) {}
+
     updateTrackerUI();
     updateHUD();
     updatePromptInjection();
@@ -1759,6 +1791,10 @@ function getRollPanelHTML() {
     <button id="cfr-btn-scan-last" style="flex:1;padding:5px 4px;background:rgba(52,152,219,0.12);border:1px solid #3498db;border-radius:4px;color:#3498db;font-size:11px;cursor:pointer;">🔍 Scan Last Message</button>
     <button id="cfr-btn-scan-forge" style="flex:1;padding:5px 4px;background:rgba(46,204,113,0.1);border:1px solid #2ecc71;border-radius:4px;color:#2ecc71;font-size:11px;cursor:pointer;">⚙ Apply Forge Block</button>
   </div>
+  <div style="display:flex;gap:6px;margin-top:5px;">
+    <button id="cfr-btn-stamp-forge" style="flex:1;padding:5px 4px;background:rgba(155,89,182,0.12);border:1px solid #9b59b6;border-radius:4px;color:#9b59b6;font-size:11px;cursor:pointer;">📋 Stamp to Chat</button>
+    <button id="cfr-btn-force-sync" style="flex:1;padding:5px 4px;background:rgba(230,126,34,0.12);border:1px solid #e67e22;border-radius:4px;color:#e67e22;font-size:11px;cursor:pointer;">⚡ Sync AI Context</button>
+  </div>
 
   <!-- Roll result card -->
   <div id="cfr-roll-card" style="display:none; margin-top:10px; background:rgba(0,0,0,0.4); border:1px solid #444; border-radius:6px; padding:10px; font-size:12px;">
@@ -1999,6 +2035,8 @@ function bindRollButtons() {
 
     $('#cfr-btn-scan-last').on('click', () => scanLastMessage());
     $('#cfr-btn-scan-forge').on('click', () => applyLastForgeBlock());
+    $('#cfr-btn-stamp-forge').on('click', () => stampForgeBlock());
+    $('#cfr-btn-force-sync').on('click', () => forceSyncPrompt());
 
     // Global modifier buttons
     $('#cfr-btn-apply-gamer').on('click', () => {
@@ -3350,6 +3388,57 @@ function loadExtensionSettingsUI() {
 //  MESSAGE HANDLING
 // ============================================================
 
+// Stamp current tracker state as a forge block into the ST send textarea.
+// Player reviews it, then hits Send — AI sees it in chat history as authoritative state.
+function stampForgeBlock() {
+    if (!cfrTracker) {
+        showRollToast('Tracker not initialised', true);
+        return;
+    }
+
+    const block = cfrTracker.toForgeInjection();  // returns the ```forge...``` string
+    if (!block) {
+        showRollToast('Nothing to stamp — no state loaded', true);
+        return;
+    }
+
+    // ST's main send textarea
+    const ta = document.getElementById('send_textarea');
+    if (!ta) {
+        // Fallback: copy to clipboard
+        navigator.clipboard?.writeText(block).then(() => {
+            showRollToast('📋 Forge block copied to clipboard — paste into chat');
+        }).catch(() => {
+            showRollToast('⚠️ Could not find send box — open console for block', true);
+            console.log('[CFR] Forge block: ' + block);
+        });
+        return;
+    }
+
+    // Prepend to any existing text so we don't wipe a message they were typing
+    const existing = ta.value.trim();
+    ta.value = existing ? `${block}
+
+${existing}` : block;
+
+    // Trigger ST's input listeners so character count etc. updates
+    ta.dispatchEvent(new Event('input', { bubbles: true }));
+    ta.focus();
+
+    showRollToast('📋 Forge block ready in send box — review and send');
+}
+
+// Force the invisible prompt injection to reflect current state immediately.
+// Useful after a profile switch so the AI context is correct before the next message.
+function forceSyncPrompt() {
+    if (!cfrTracker) return;
+    updatePromptInjection();
+    showRollToast('⚡ Prompt synced — AI context updated');
+}
+
+window.stampForgeBlock  = stampForgeBlock;
+window.forceSyncPrompt  = forceSyncPrompt;
+
 // Passive scanner — catches perk headers in ANY response even without an active roll
 // Shows a toast so the player can manually add if needed
 function passivePerkScan(text) {
@@ -3444,17 +3533,61 @@ async function onMessageReceived(data) {
     }, 300);
 }
 
-function onChatChanged() {
+async function onChatChanged() {
     if (!cfrTracker) return;
-    cfrTracker.load();
     cfrLastMsgIdx = -1;
+
+    // Clear any in-flight roll state from the previous chat
+    // so it doesn't contaminate the incoming chat context
+    if (cfrActiveRoll) {
+        cfrActiveRoll = null;
+        hideRollCard?.();
+    }
+    if (cfrAwaitingCreation || cfrGetAwaiting()) {
+        cfrAwaitingCreation = false;
+        cfrSetAwaiting(false);
+        // Also clear the creation prompt injection from ST
+        try {
+            const ctx = SillyTavern.getContext();
+            if (typeof ctx.setExtensionPrompt === 'function') {
+                ctx.setExtensionPrompt('cfr-creation-roll', '', 0, 0);
+            }
+        } catch(e) {}
+    }
+
+    // First: try localStorage for this chat
+    const ctx      = SillyTavern.getContext();
+    const localKey = ctx?.chatId ? `cfr_${ctx.chatId}` : null;
+    const hasLocal = localKey && !!localStorage.getItem(localKey);
+
+    cfrTracker.load();
+
+    // If localStorage had nothing for this chat AND Gist is configured,
+    // pull the active profile — this is the "new chat, carry perks across" case
+    if (!hasLocal && cfrSettings?.gist_id && cfrSettings?.gist_pat) {
+        if (cfrSettings.debug_mode) console.log('[CFR] New chat — pulling profile from Gist:', getActiveProfile());
+        showStatus('cfr-gist-status', '⬇ Loading profile for new chat…', 'ok');
+        try {
+            await gistLoad(getActiveProfile());
+            // Seed localStorage for this chat so future loads within the session are instant
+            cfrTracker.save();
+            showStatus('cfr-gist-status', `✅ Profile "${getActiveProfile()}" loaded`, 'ok');
+        } catch(e) {
+            console.warn('[CFR] Gist pull on chat change failed:', e);
+        }
+    }
+
     updateTrackerUI();
     updateHUD();
+    updatePromptInjection();   // ← push correct state to AI before first message
+    updateProfileUI();
+
     setTimeout(() => {
         refreshAllDetails();
         hideForgeBlocks();
     }, 500);
-    if (cfrSettings?.debug_mode) console.log('[CFR] 💬 Chat changed, state reloaded');
+
+    if (cfrSettings?.debug_mode) console.log('[CFR] 💬 Chat changed — state:', cfrTracker.state.acquired_perks.length, 'perks,', cfrTracker.state.available_cp, 'CP');
 }
 
 
@@ -3542,6 +3675,16 @@ function setupEventListeners() {
         cfrEventSource.on(cfrEventTypes.CHAT_CHANGED, onChatChanged);
         bound++;
         console.log('[CFR] ✅ Bound: CHAT_CHANGED');
+    }
+
+    // Also bind CHAT_CREATED and CHAT_LOADED if ST exposes them — covers edge cases
+    // where a brand new chat fires a different event than an existing chat switch
+    for (const evName of ['CHAT_CREATED', 'CHAT_LOADED', 'CHARACTER_LOADED']) {
+        if (cfrEventTypes[evName]) {
+            cfrEventSource.on(cfrEventTypes[evName], onChatChanged);
+            bound++;
+            console.log(`[CFR] ✅ Bound: ${evName}`);
+        }
     }
 
     console.log(`[CFR] 🎯 ${bound} events bound`);
