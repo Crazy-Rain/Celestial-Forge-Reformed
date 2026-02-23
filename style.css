@@ -320,8 +320,77 @@
     pointer-events: none; /* CRITICAL: don't block ST controls when hidden */
 }
 
-@media (max-width: 500px) {
-    #cfr-hud { width: 100%; border-left: none; }
+/* ── MOBILE LAYOUT (<= 600px) ─────────────────────────────── */
+@media (max-width: 600px) {
+
+    /* Full-width panel, no left border */
+    #cfr-hud {
+        width: 100%;
+        border-left: none;
+        /* Switch from flex-column with one scrolling child
+           to a fully scrollable column — nothing clips off screen */
+        overflow-y: auto;
+        overflow-x: hidden;
+        flex-direction: column;
+        height: 100%; height: 100dvh;
+    }
+
+    /* Header — tighter, smaller title */
+    .cfr-hud-header { padding: 8px 12px; }
+    .cfr-hud-title  { font-size: 13px; letter-spacing: 2px; }
+    .cfr-hud-sub    { font-size: 9px; }
+
+    /* CP boxes — smaller numbers, less padding */
+    .cfr-hud-cp     { padding: 8px 10px; }
+    .cfr-hud-cp-val { font-size: 18px; }
+    .cfr-hud-cp-label { font-size: 8px; }
+
+    /* Meters — tighter */
+    .cfr-hud-meters { padding: 7px 12px; gap: 6px; }
+
+    /* Perk list — no longer flex:1 / no longer scroll-within.
+       On mobile it expands to its full natural height and the
+       whole HUD scrolls, so no content gets crushed. */
+    .cfr-hud-perks {
+        flex: none;
+        overflow-y: visible;
+        max-height: none;
+        padding: 8px 12px 10px;
+        /* Subtle separator so it reads as its own zone */
+        border-bottom: 1px solid #1a1a2e;
+    }
+
+    /* Roll panel — allow it to be as tall as it needs to be */
+    #cfr-roll-panel {
+        flex-shrink: 0;
+        /* If the roll card is open and tall, it scrolls with the HUD */
+        overflow: visible;
+    }
+
+    /* Roll card — give perk description room to breathe */
+    #cfr-roll-card {
+        max-height: none !important;
+        overflow: visible;
+    }
+
+    /* Acquire / Bank / Discard row — stack vertically on very narrow screens */
+    #cfr-roll-buttons {
+        flex-wrap: wrap;
+    }
+    #cfr-roll-buttons button {
+        min-width: 80px;
+        padding: 8px 4px !important;
+        font-size: 12px !important;
+    }
+
+    /* Banked section */
+    #cfr-banked-section { padding: 0 12px 12px; }
+
+    /* Sync footer — stick to natural flow, not flex-shrink */
+    .cfr-hud-sync { flex-shrink: 0; }
+
+    /* Toggle button repositioning when open */
+    #cfr-hud-btn.open { right: calc(100% - 48px); }
 }
 
 .cfr-hud-header {
@@ -455,9 +524,7 @@
 #cfr-hud-btn:hover   { background: #23345c; }
 #cfr-hud-btn.open    { right: 350px; }
 
-@media (max-width: 500px) {
-    #cfr-hud-btn.open { right: calc(100% - 48px); }
-}
+/* btn mobile rule consolidated into 600px block above */
 
 
 /* ── 4. IN-CHAT DETAILS INJECTION ────────────────────────── */
@@ -566,4 +633,4 @@
 /* Hide raw forge JSON blocks in chat — replaces SimTracker's hide feature */
 .cfr-forge-hidden {
     display: none !important;
-}
+                         }
