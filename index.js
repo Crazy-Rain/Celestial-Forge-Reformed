@@ -1020,6 +1020,7 @@ function setActiveProfile(name) {
     cfrSettings.active_profile = sanitizeProfileName(name);
     cfrSaveDebounced?.();
     updateProfileUI();
+    updateConstellationManagerList();
 }
 
 function listProfiles(gistData) {
@@ -1071,6 +1072,11 @@ async function gistLoad(profileNameOverride) {
         if (cfrGistFileList[CFR_GIST_DB_FILE]) {
             const dbRes = await fetch(cfrGistFileList[CFR_GIST_DB_FILE]);
             cfrPerkDB   = await dbRes.json();
+            // Migrate: add custom_constellations if this is an older DB
+            if (!cfrPerkDB.custom_constellations) {
+                cfrPerkDB.custom_constellations = {};
+                console.log('[CFR] Migrated DB — custom_constellations added');
+            }
         } else {
             cfrPerkDB = buildEmptyDB();
         }
@@ -1111,6 +1117,7 @@ async function gistLoad(profileNameOverride) {
         }
 
         if (profileNameOverride) setActiveProfile(profileNameOverride);
+        refreshConstellationDropdowns();
         console.log('[CFR] ✅ Gist load complete');
 
     } catch(e) {
@@ -1305,12 +1312,34 @@ function updateProfileUI() {
     if (hudProfile) hudProfile.textContent = current;
 }
 
+// Returns merged { KEY: 'Label' } from base hardcoded + custom in DB
+// Everything that previously read CFR_CONSTELLATIONS directly should call this
+function getActiveConstellations() {
+    const base   = { ...CFR_CONSTELLATIONS };
+    const custom = cfrPerkDB?.custom_constellations || {};
+    const merged = { ...base };
+    for (const [key, data] of Object.entries(custom)) {
+        merged[key] = data.label || key;
+    }
+    return merged;
+}
+
+// Returns category string for a constellation key, or '' for base ones
+function getConstellationCategory(key) {
+    return cfrPerkDB?.custom_constellations?.[key]?.category || '';
+}
+
 function buildEmptyDB() {
     const constellations = {};
     for (const key of Object.keys(CFR_CONSTELLATIONS)) {
         constellations[key] = { domain: '', theme: '', perks: [] };
     }
-    return { version: '1.0.0', last_updated: '', constellations };
+    return {
+        version:             '1.0.0',
+        last_updated:        '',
+        custom_constellations: {},   // user-added: { KEY: { label, category, perks[] } }
+        constellations
+    };
 }
 
 // Add a perk to the database for a constellation
@@ -1343,6 +1372,266 @@ async function dbAddPerk(constellationKey, perkData) {
 
     await gistSaveDB();
     return { success: true, id: newId };
+}
+
+// ── AI GUIDE GENERATION ──────────────────────────────────────
+
+async function generateConstellationGuide(key, label, category) {
+    const prompt = `You are defining the design space for a Celestial Forge perk constellation.
+
+Celestial Forge is a jumpchain fanfiction concept where a protagonist randomly acquires crafting and technology abilities from fictional universes by accumulating Creation Points (CP). Perks belong to constellations (thematic domains) and have costs ranging from 50 CP (Tier 1 - Foundation) to 700+ CP (Tier 6 - Mythic).
+
+Constellation to define:
+NAME: ${label}
+CATEGORY: ${category}
+
+Write a concise domain guide covering:
+
+DOMAIN OVERVIEW: What crafting, ability, or power space does this source material represent? What is the core fantasy of gaining abilities from it?
+
+THEMATIC FLAVOR: What distinguishes perks from this constellation? What makes them feel authentic to the source? What tone — brutal, elegant, systematic, chaotic, esoteric?
+
+TIER EXAMPLES (brief phrases, not full perk descriptions):
+- Foundation (50-100 CP): basic exposure, entry-level techniques
+- Journeyman (100-200 CP): functional competence, notable utility
+- Expert (200-350 CP): signature techniques, recognizable abilities
+- Master (350-500 CP): near-protagonist tier, rare specializations
+- Transcendent (500-700 CP): top-tier canon abilities, game-changers
+- Mythic (700+ CP): apex or unique abilities from peak characters
+
+MECHANICAL NOTES: Key mechanics from the source that should shape perk design — resource systems (e.g. mana, cursed energy, nen), hard limitations, notable prerequisites, interesting synergies or failure modes.
+
+FLAGS: Which of these flags are most thematically appropriate: PASSIVE, TOGGLEABLE, ALWAYS-ON, SCALING, UNCAPPED, CORRUPTING, SANITY-TAXING, COMBAT, UTILITY, CRAFTING, MENTAL, PHYSICAL, SELECTIVE?
+
+AVOID GENERATING: Any perks that would be direct duplicates of abilities another constellation already covers generically. What makes THIS constellation distinct?
+
+Write 350-450 words. Be specific and practical — this is a reference for future AI perk generation, not a summary for a reader unfamiliar with the source.`;
+
+    try {
+        const ctx = SillyTavern.getContext();
+        if (typeof ctx.generateQuietPrompt !== 'function') {
+            throw new Error('generateQuietPrompt not available — upgrade SillyTavern');
+        }
+        // generateQuietPrompt(prompt, quietToLoud, skipWIAN)
+        // Uses ST's active API connection + current preset — no auth needed
+        const guide = await ctx.generateQuietPrompt(prompt, false, true);
+        return guide?.trim() || null;
+    } catch(e) {
+        console.error('[CFR] Guide generation failed:', e);
+        return null;
+    }
+}
+
+// Regenerate guide for an existing constellation (button in manager list)
+window.cfrRegenerateGuide = async function(key) {
+    const custom = cfrPerkDB?.custom_constellations?.[key];
+    if (!custom) return;
+
+    const statusEl = document.getElementById('cfr-const-status');
+    if (statusEl) {
+        statusEl.textContent = `⏳ Generating guide for "${custom.label}" via ST connection…`;
+        statusEl.className   = 'cfr-status-msg ok';
+    }
+
+    const guide = await generateConstellationGuide(key, custom.label, custom.category);
+    if (guide) {
+        cfrPerkDB.custom_constellations[key].domain_guide = guide;
+        await gistSaveDB();
+        updateConstellationManagerList();
+        if (statusEl) {
+            statusEl.textContent = `✅ Guide generated for "${custom.label}"`;
+        }
+    } else {
+        if (statusEl) {
+            statusEl.textContent = '⚠️ Guide generation failed — check API key or generate manually';
+            statusEl.className   = 'cfr-status-msg err';
+        }
+    }
+};
+
+// Save a manually-edited guide
+window.cfrSaveGuide = async function(key) {
+    const ta = document.getElementById(`cfr-guide-ta-${key}`);
+    if (!ta || !cfrPerkDB?.custom_constellations?.[key]) return;
+
+    cfrPerkDB.custom_constellations[key].domain_guide = ta.value.trim();
+    await gistSaveDB();
+
+    const statusEl = document.getElementById('cfr-const-status');
+    if (statusEl) {
+        statusEl.textContent = `✅ Guide saved for "${cfrPerkDB.custom_constellations[key].label}"`;
+        statusEl.className   = 'cfr-status-msg ok';
+    }
+};
+
+// Toggle guide editor visibility
+window.cfrToggleGuide = function(key) {
+    const el = document.getElementById(`cfr-guide-editor-${key}`);
+    if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
+};
+
+// Add a brand-new constellation to the DB (custom only)
+async function dbAddConstellation(label, category) {
+    if (!cfrPerkDB) cfrPerkDB = buildEmptyDB();
+    if (!cfrPerkDB.custom_constellations) cfrPerkDB.custom_constellations = {};
+
+    // Generate a clean ALL_CAPS key
+    const key = label.trim()
+        .toUpperCase()
+        .replace(/[^A-Z0-9]+/g, '_')
+        .replace(/^_|_$/g, '')
+        .slice(0, 40);
+
+    if (!key) return { success: false, reason: 'invalid_name' };
+    if (CFR_CONSTELLATIONS[key] || cfrPerkDB.custom_constellations[key]) {
+        return { success: false, reason: 'already_exists', key };
+    }
+
+    cfrPerkDB.custom_constellations[key] = {
+        label:    label.trim(),
+        category: category || 'Custom',
+        created_at: new Date().toISOString()
+    };
+    // Also seed the perks array in constellations for roll queries
+    if (!cfrPerkDB.constellations) cfrPerkDB.constellations = {};
+    cfrPerkDB.constellations[key] = { domain: '', theme: '', perks: [] };
+
+    await gistSaveDB();
+    refreshConstellationDropdowns();
+
+    // Fire guide generation in background via ST connection — always attempts, no key needed
+    {
+        const statusEl = document.getElementById('cfr-const-status');
+        if (statusEl) {
+            statusEl.textContent = `⏳ Generating domain guide for "${label}" via ST connection…`;
+            statusEl.className   = 'cfr-status-msg ok';
+        }
+        generateConstellationGuide(key, label.trim(), category || 'Custom').then(guide => {
+            if (guide && cfrPerkDB?.custom_constellations?.[key]) {
+                cfrPerkDB.custom_constellations[key].domain_guide = guide;
+                gistSaveDB();
+                updateConstellationManagerList();
+                if (statusEl) statusEl.textContent = `✅ "${label}" added with domain guide`;
+            } else if (statusEl) {
+                statusEl.textContent = `✅ "${label}" added — ST connection unavailable, add guide manually`;
+            }
+        });
+    }
+
+    return { success: true, key };
+}
+
+// Remove a custom constellation (cannot remove base ones)
+async function dbRemoveConstellation(key) {
+    if (CFR_CONSTELLATIONS[key]) {
+        return { success: false, reason: 'cannot_remove_base' };
+    }
+    if (!cfrPerkDB?.custom_constellations?.[key]) {
+        return { success: false, reason: 'not_found' };
+    }
+
+    const perkCount = cfrPerkDB.constellations?.[key]?.perks?.length || 0;
+    delete cfrPerkDB.custom_constellations[key];
+    // Leave perk data in place — user might re-add with same key later
+
+    await gistSaveDB();
+    refreshConstellationDropdowns();
+    return { success: true, perks_preserved: perkCount };
+}
+
+// Rebuild the constellation <select> dropdowns from current merged list
+function refreshConstellationDropdowns() {
+    const active = getActiveConstellations();
+
+    // Group by category for <optgroup>
+    const groups = { Core: [] };
+    for (const [key, label] of Object.entries(CFR_CONSTELLATIONS)) {
+        groups.Core.push({ key, label });
+    }
+    const custom = cfrPerkDB?.custom_constellations || {};
+    for (const [key, data] of Object.entries(custom)) {
+        const cat = data.category || 'Custom';
+        if (!groups[cat]) groups[cat] = [];
+        groups[cat].push({ key, label: data.label || key });
+    }
+
+    const buildOptions = (includeRandom, randomLabel) => {
+        let html = includeRandom ? `<option value="">${randomLabel}</option>` : '';
+        for (const [cat, items] of Object.entries(groups)) {
+            if (!items.length) continue;
+            html += `<optgroup label="${cat}">`;
+            html += items.map(({key, label}) => `<option value="${key}">${label}</option>`).join('');
+            html += `</optgroup>`;
+        }
+        return html;
+    };
+
+    // HUD roll panel dropdown
+    const rollSel = document.getElementById('cfr-roll-constellation');
+    if (rollSel) {
+        const cur = rollSel.value;
+        rollSel.innerHTML = buildOptions(true, '🎲 Random Constellation');
+        if (cur) rollSel.value = cur;
+    }
+
+    // Constellation manager list in settings drawer
+    updateConstellationManagerList();
+}
+
+// Update the visual list inside the Constellation Manager tab
+function updateConstellationManagerList() {
+    const el = document.getElementById('cfr-const-list');
+    if (!el) return;
+
+    const custom = cfrPerkDB?.custom_constellations || {};
+    const base   = CFR_CONSTELLATIONS;
+
+    let html = '';
+
+    // Base — read-only, shown as reference
+    html += `<div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Core (${Object.keys(base).length})</div>`;
+    html += `<div style="max-height:100px;overflow-y:auto;margin-bottom:10px;padding:4px;background:rgba(0,0,0,0.2);border-radius:4px;">`;
+    for (const [k, v] of Object.entries(base)) {
+        html += `<div style="font-size:10px;color:#555;padding:1px 0;">${v}</div>`;
+    }
+    html += `</div>`;
+
+    // Custom — deletable
+    const customKeys = Object.keys(custom);
+    html += `<div style="font-size:10px;color:#e94560;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Custom (${customKeys.length})</div>`;
+
+    if (!customKeys.length) {
+        html += `<div style="font-size:10px;color:#333;font-style:italic;padding:6px 0;">No custom constellations yet</div>`;
+    } else {
+        for (const [k, data] of Object.entries(custom)) {
+            const perkCount  = cfrPerkDB?.constellations?.[k]?.perks?.length || 0;
+            const hasGuide   = !!data.domain_guide;
+            const guidePreview = hasGuide
+                ? data.domain_guide.slice(0, 80).replace(/</g, "&lt;") + "…"
+                : "No guide yet — create one below";
+            html += `
+            <div style="background:rgba(233,69,96,0.05);border-left:2px solid #e94560;border-radius:0 4px 4px 0;margin-bottom:6px;overflow:hidden;">
+                <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 8px;">
+                    <div style="flex:1;min-width:0;">
+                        <div style="font-size:11px;color:#ddd;font-weight:bold;">${data.label}</div>
+                        <div style="font-size:9px;color:#555;">${data.category || 'Custom'} · ${perkCount} perk${perkCount !== 1 ? 's' : ''} · key: ${k}</div>
+                    </div>
+                    <div style="display:flex;gap:4px;flex-shrink:0;margin-left:6px;">
+                        <button onclick="cfrToggleGuide('${k}')" style="padding:2px 5px;background:rgba(52,152,219,0.1);border:1px solid #3498db44;border-radius:3px;color:#3498db;font-size:9px;cursor:pointer;">📝</button>
+                            <button onclick="cfrRegenerateGuide('${k}')" style="padding:2px 5px;background:rgba(241,196,15,0.1);border:1px solid #f1c40f44;border-radius:3px;color:#f1c40f;font-size:9px;cursor:pointer;">⚡</button>
+                        <button onclick="cfrDeleteConstellation('${k}')" style="padding:2px 5px;background:rgba(231,76,60,0.1);border:1px solid #e74c3c44;border-radius:3px;color:#e74c3c;font-size:9px;cursor:pointer;">✕</button>
+                    </div>
+                </div>
+                <div style="padding:0 8px 4px;font-size:9px;color:#444;font-style:italic;">${guidePreview}</div>
+                <div id="cfr-guide-editor-${k}" style="display:none;padding:6px 8px;border-top:1px solid #1a1a2e;">
+                    <textarea id="cfr-guide-ta-${k}" style="width:100%;height:120px;background:#0a0a1a;border:1px solid #2a2a4e;border-radius:3px;color:#aaa;font-size:10px;padding:5px;box-sizing:border-box;resize:vertical;font-family:inherit;">${(data.domain_guide || '').replace(/</g, "&lt;")}</textarea>
+                    <button onclick="cfrSaveGuide('${k}')" style="margin-top:4px;padding:3px 10px;background:rgba(46,204,113,0.15);border:1px solid #2ecc71;border-radius:3px;color:#2ecc71;font-size:10px;cursor:pointer;">💾 Save Guide</button>
+                </div>
+            </div>`;
+        }
+    }
+
+    el.innerHTML = html;
 }
 
 // Update an existing DB entry by id — called when player edits a perk manually
@@ -1384,7 +1673,7 @@ function dbRollPerk(constellationKey) {
 
 // Pick a random constellation key
 function dbRandomConstellation() {
-    const keys = Object.keys(CFR_CONSTELLATIONS);
+    const keys = Object.keys(getActiveConstellations());
     return keys[Math.floor(Math.random() * keys.length)];
 }
 
@@ -1416,8 +1705,11 @@ let cfrCreationConstellation = null;
 
 function buildCreationPrompt(constellationKey, tier) {
     const constData = cfrPerkDB?.constellations?.[constellationKey];
-    const label     = CFR_CONSTELLATIONS[constellationKey] || constellationKey;
-    const theme     = constData?.theme || '';
+    const label     = getActiveConstellations()[constellationKey] || constellationKey;
+    // Custom constellations have a domain_guide (AI-generated or manual)
+    // Base constellations can have a theme set manually in the DB
+    const customEntry = cfrPerkDB?.custom_constellations?.[constellationKey];
+    const theme       = customEntry?.domain_guide || constData?.theme || '';
     const existing  = (constData?.perks || []).map(p => p.name).join(', ') || 'none yet';
     const tierLabel = CFR_TIER_LABELS[tier] || 'Expert';
     const cpRanges  = ['','50-100','100-200','200-350','350-500','500-700','700-1000'];
@@ -1477,7 +1769,7 @@ async function triggerForgeRoll(constellationKey) {
     if (!cfrPerkDB) await gistLoad();
 
     const key   = constellationKey || dbRandomConstellation();
-    const label = CFR_CONSTELLATIONS[key] || key;
+    const label = getActiveConstellations()[key] || key;
     const perk  = dbRollPerk(key);
 
     if (!perk) {
@@ -1494,7 +1786,7 @@ async function triggerCreationRoll(constellationKey, tier) {
     if (!cfrPerkDB) await gistLoad();
 
     const key   = constellationKey || dbRandomConstellation();
-    const label = CFR_CONSTELLATIONS[key] || key;
+    const label = getActiveConstellations()[key] || key;
     const t     = tier || Math.ceil(Math.random() * 4) + 1; // weighted toward mid tiers
 
     cfrCreationConstellation = key;
@@ -1597,7 +1889,7 @@ async function finalizeCreationRoll(text) {
         type:               'creation',
         perk,
         constellationKey:   cfrCreationConstellation,
-        constellationLabel: CFR_CONSTELLATIONS[cfrCreationConstellation] || cfrCreationConstellation
+        constellationLabel: getActiveConstellations()[cfrCreationConstellation] || cfrCreationConstellation
     };
 
     // Open HUD if closed so player sees the result card
@@ -2069,6 +2361,26 @@ function bindRollButtons() {
         updateGlobalModStatus();
         updatePromptInjection();
         showStatus('cfr-global-mod-status', '✅ UNCAPPED activated — all scaling perks unlimited', 'ok');
+    });
+
+    // Constellation manager buttons
+    $('#cfr-btn-const-add').on('click', async () => {
+        const name = $('#cfr-const-name-input').val().trim();
+        const cat  = $('#cfr-const-cat-select').val();
+        if (!name) {
+            showStatus('cfr-const-status', '⚠️ Enter a constellation name', 'err');
+            return;
+        }
+        showStatus('cfr-const-status', '➕ Adding…', 'ok');
+        const result = await dbAddConstellation(name, cat);
+        if (result.success) {
+            $('#cfr-const-name-input').val('');
+            showStatus('cfr-const-status', `✅ "${name}" added (key: ${result.key})`, 'ok');
+        } else if (result.reason === 'already_exists') {
+            showStatus('cfr-const-status', `⚠️ Already exists as ${result.key}`, 'err');
+        } else {
+            showStatus('cfr-const-status', `⚠️ ${result.reason}`, 'err');
+        }
     });
 
     // Profile management buttons
@@ -2592,6 +2904,40 @@ function getCFRSettingsHtml() {
           <div class="cfr-btn-row">
             <input type="button" class="menu_button" id="cfr-btn-apply-uncapped" value="Activate UNCAPPED" />
           </div>
+        </div>
+      </div>
+
+      <!-- CONSTELLATION MANAGER -->
+      <div class="cfr-manual-section">
+        <div class="cfr-manual-title">🌌 Constellations</div>
+        <div class="cfr-settings-section">
+          <div style="font-size:10px;color:#888;margin-bottom:8px;line-height:1.4;">
+            Add constellations from any source — anime, manga, web novels, fanfics, original systems.
+            Base constellations are read-only. Custom ones can be deleted.
+          </div>
+          <div class="cfr-form-field">
+            <label>Name (e.g. JJK — Cursed Techniques)</label>
+            <input type="text" id="cfr-const-name-input" placeholder="Display name..." />
+          </div>
+          <div class="cfr-form-field">
+            <label>Category</label>
+            <select id="cfr-const-cat-select" style="font-size:12px;">
+              <option value="Anime / Manga">Anime / Manga</option>
+              <option value="Web Novel / Light Novel">Web Novel / Light Novel</option>
+              <option value="Fanfiction">Fanfiction (SB / QQ / AO3)</option>
+              <option value="Manhwa / Manhua">Manhwa / Manhua</option>
+              <option value="Game">Game</option>
+              <option value="Western Media">Western Media</option>
+              <option value="Jumpchain Source">Jumpchain Source</option>
+              <option value="Original System">Original System</option>
+              <option value="Custom">Custom</option>
+            </select>
+          </div>
+          <div class="cfr-btn-row" style="margin-bottom:8px;">
+            <input type="button" class="menu_button" id="cfr-btn-const-add" value="➕ Add Constellation" />
+          </div>
+          <div id="cfr-const-status" class="cfr-status-msg"></div>
+          <div id="cfr-const-list" style="margin-top:8px;"></div>
         </div>
       </div>
 
@@ -3326,6 +3672,18 @@ function refreshPerkOverrideStatus(perk) {
     }
 }
 
+// Called from onclick in updateConstellationManagerList
+window.cfrDeleteConstellation = async function(key) {
+    if (!confirm(`Remove constellation "${key}" from the list?
+Perk data is preserved — you can re-add later.`)) return;
+    const result = await dbRemoveConstellation(key);
+    if (result.success) {
+        showStatus('cfr-const-status', `✅ Removed "${key}" (${result.perks_preserved} perks preserved in DB)`, 'ok');
+    } else {
+        showStatus('cfr-const-status', `⚠️ ${result.reason}`, 'err');
+    }
+};
+
 function bindExtensionSettings() {
     $('#cfr-enabled').on('change', function() {
         cfrSettings.enabled = $(this).prop('checked');
@@ -3495,7 +3853,7 @@ function passivePerkScan(text) {
         type: 'creation',
         perk,
         constellationKey:   cfrCreationConstellation || '',
-        constellationLabel: CFR_CONSTELLATIONS[cfrCreationConstellation] || 'Unknown Constellation'
+        constellationLabel: getActiveConstellations()[cfrCreationConstellation] || 'Unknown Constellation'
     };
 
     const hud = document.getElementById('cfr-hud');
