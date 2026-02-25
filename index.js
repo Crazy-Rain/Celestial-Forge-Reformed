@@ -1435,15 +1435,39 @@ window.cfrRegenerateGuide = async function(key) {
 
     const guide = await generateConstellationGuide(key, custom.label, custom.category);
     if (guide) {
-        cfrPerkDB.custom_constellations[key].domain_guide = guide;
-        await gistSaveDB();
+        // ── Drop into textarea for review — do NOT write to Gist yet ──
+        // Ensure the editor panel exists in the DOM
         updateConstellationManagerList();
-        if (statusEl) {
-            statusEl.textContent = `✅ Guide generated for "${custom.label}"`;
+
+        const ta       = document.getElementById(`cfr-guide-ta-${key}`);
+        const editorEl = document.getElementById(`cfr-guide-editor-${key}`);
+        const saveBtn  = editorEl?.querySelector('button');
+
+        if (ta) {
+            ta.value = guide;
+            // Open the editor so LO can read it immediately
+            if (editorEl) editorEl.style.display = 'block';
+            // Highlight the save button so it's obvious confirmation is needed
+            if (saveBtn) {
+                saveBtn.style.background    = 'rgba(241,196,15,0.25)';
+                saveBtn.style.borderColor   = '#f1c40f';
+                saveBtn.style.color         = '#f1c40f';
+                saveBtn.textContent         = '💾 Confirm & Save to Gist';
+            }
+            if (statusEl) {
+                statusEl.textContent = `✅ Guide ready — review below, edit if needed, then hit Confirm & Save`;
+                statusEl.className   = 'cfr-status-msg ok';
+            }
+        } else {
+            // Textarea not in DOM for some reason — fall back to status note
+            if (statusEl) {
+                statusEl.textContent = '⚠️ Could not open editor — scroll to constellation and use 📝 to review';
+                statusEl.className   = 'cfr-status-msg err';
+            }
         }
     } else {
         if (statusEl) {
-            statusEl.textContent = '⚠️ Guide generation failed — check API key or generate manually';
+            statusEl.textContent = '⚠️ Generation failed — ST connection may be busy, try again or write guide manually';
             statusEl.className   = 'cfr-status-msg err';
         }
     }
@@ -1454,12 +1478,26 @@ window.cfrSaveGuide = async function(key) {
     const ta = document.getElementById(`cfr-guide-ta-${key}`);
     if (!ta || !cfrPerkDB?.custom_constellations?.[key]) return;
 
+    const label = cfrPerkDB.custom_constellations[key].label;
     cfrPerkDB.custom_constellations[key].domain_guide = ta.value.trim();
     await gistSaveDB();
 
+    // Reset save button back to normal style after confirmed commit
+    const editorEl = document.getElementById(`cfr-guide-editor-${key}`);
+    const saveBtn  = editorEl?.querySelector('button');
+    if (saveBtn) {
+        saveBtn.style.background    = 'rgba(46,204,113,0.15)';
+        saveBtn.style.borderColor   = '#2ecc71';
+        saveBtn.style.color         = '#2ecc71';
+        saveBtn.textContent         = '💾 Save Guide';
+    }
+
+    // Refresh preview snippet in the list header
+    updateConstellationManagerList();
+
     const statusEl = document.getElementById('cfr-const-status');
     if (statusEl) {
-        statusEl.textContent = `✅ Guide saved for "${cfrPerkDB.custom_constellations[key].label}"`;
+        statusEl.textContent = `✅ Guide saved and synced to Gist for "${label}"`;
         statusEl.className   = 'cfr-status-msg ok';
     }
 };
@@ -1508,12 +1546,24 @@ async function dbAddConstellation(label, category) {
         }
         generateConstellationGuide(key, label.trim(), category || 'Custom').then(guide => {
             if (guide && cfrPerkDB?.custom_constellations?.[key]) {
-                cfrPerkDB.custom_constellations[key].domain_guide = guide;
-                gistSaveDB();
+                // Refresh list first so textarea element exists in DOM
                 updateConstellationManagerList();
-                if (statusEl) statusEl.textContent = `✅ "${label}" added with domain guide`;
+                const ta       = document.getElementById(`cfr-guide-ta-${key}`);
+                const editorEl = document.getElementById(`cfr-guide-editor-${key}`);
+                const saveBtn  = editorEl?.querySelector('button');
+                if (ta) {
+                    ta.value = guide;
+                    if (editorEl) editorEl.style.display = 'block';
+                    if (saveBtn) {
+                        saveBtn.style.background  = 'rgba(241,196,15,0.25)';
+                        saveBtn.style.borderColor = '#f1c40f';
+                        saveBtn.style.color       = '#f1c40f';
+                        saveBtn.textContent       = '💾 Confirm & Save to Gist';
+                    }
+                    if (statusEl) statusEl.textContent = `✅ "${label}" added — guide ready below, review then Confirm & Save`;
+                }
             } else if (statusEl) {
-                statusEl.textContent = `✅ "${label}" added — ST connection unavailable, add guide manually`;
+                statusEl.textContent = `✅ "${label}" added — ST connection unavailable, write guide manually via 📝`;
             }
         });
     }
