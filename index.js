@@ -1424,7 +1424,11 @@ Write 350-450 words. Be specific and practical — this is a reference for futur
 
 // Regenerate guide for an existing constellation (button in manager list)
 window.cfrRegenerateGuide = async function(key) {
-    const custom = cfrPerkDB?.custom_constellations?.[key];
+    const isBase = !!CFR_CONSTELLATIONS[key];
+    // For base constellations, build a minimal data object so the rest of the function is uniform
+    const custom = isBase
+        ? { label: CFR_CONSTELLATIONS[key], category: 'Core' }
+        : cfrPerkDB?.custom_constellations?.[key];
     if (!custom) return;
 
     const statusEl = document.getElementById('cfr-const-status');
@@ -1476,10 +1480,25 @@ window.cfrRegenerateGuide = async function(key) {
 // Save a manually-edited guide
 window.cfrSaveGuide = async function(key) {
     const ta = document.getElementById(`cfr-guide-ta-${key}`);
-    if (!ta || !cfrPerkDB?.custom_constellations?.[key]) return;
+    if (!ta || !cfrPerkDB) return;
 
-    const label = cfrPerkDB.custom_constellations[key].label;
-    cfrPerkDB.custom_constellations[key].domain_guide = ta.value.trim();
+    const guideText  = ta.value.trim();
+    const isBase     = !!CFR_CONSTELLATIONS[key];
+    let label        = '';
+
+    if (isBase) {
+        // Base constellation — write to constellations[key].theme
+        if (!cfrPerkDB.constellations) cfrPerkDB.constellations = {};
+        if (!cfrPerkDB.constellations[key]) cfrPerkDB.constellations[key] = { domain: '', theme: '', perks: [] };
+        cfrPerkDB.constellations[key].theme = guideText;
+        label = CFR_CONSTELLATIONS[key];
+    } else {
+        // Custom constellation — write to custom_constellations[key].domain_guide
+        if (!cfrPerkDB.custom_constellations?.[key]) return;
+        cfrPerkDB.custom_constellations[key].domain_guide = guideText;
+        label = cfrPerkDB.custom_constellations[key].label;
+    }
+
     await gistSaveDB();
 
     // Reset save button back to normal style after confirmed commit
@@ -1492,7 +1511,7 @@ window.cfrSaveGuide = async function(key) {
         saveBtn.textContent         = '💾 Save Guide';
     }
 
-    // Refresh preview snippet in the list header
+    // Refresh preview snippet in the list
     updateConstellationManagerList();
 
     const statusEl = document.getElementById('cfr-const-status');
@@ -1636,50 +1655,64 @@ function updateConstellationManagerList() {
     const custom = cfrPerkDB?.custom_constellations || {};
     const base   = CFR_CONSTELLATIONS;
 
+    // Helper — renders one constellation card (base or custom)
+    function renderCard(k, label, meta, guideText, isBase) {
+        const perkCount    = cfrPerkDB?.constellations?.[k]?.perks?.length || 0;
+        const hasGuide     = !!guideText;
+        const guidePreview = hasGuide
+            ? guideText.slice(0, 80).replace(/</g, '&lt;') + '…'
+            : 'No guide — hit 📝 to write or ⚡ to generate';
+        const borderColor  = isBase ? '#3a3a5c' : '#e94560';
+        const safeguide    = (guideText || '').replace(/</g, '&lt;').replace(/`/g, '\`');
+
+        return `
+        <div style="background:rgba(255,255,255,0.02);border-left:2px solid ${borderColor};border-radius:0 4px 4px 0;margin-bottom:5px;overflow:hidden;">
+            <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 8px;">
+                <div style="flex:1;min-width:0;">
+                    <div style="font-size:11px;color:${isBase ? '#aaa' : '#ddd'};font-weight:bold;">${label}</div>
+                    <div style="font-size:9px;color:#444;">${meta} · ${perkCount} perk${perkCount !== 1 ? 's' : ''} · key: ${k}</div>
+                </div>
+                <div style="display:flex;gap:4px;flex-shrink:0;margin-left:6px;">
+                    <button onclick="cfrToggleGuide('${k}')" style="padding:2px 5px;background:rgba(52,152,219,0.1);border:1px solid #3498db44;border-radius:3px;color:#3498db;font-size:9px;cursor:pointer;">📝</button>
+                    <button onclick="cfrRegenerateGuide('${k}')" style="padding:2px 5px;background:rgba(241,196,15,0.1);border:1px solid #f1c40f44;border-radius:3px;color:#f1c40f;font-size:9px;cursor:pointer;">⚡</button>
+                    ${isBase ? '' : `<button onclick="cfrDeleteConstellation('${k}')" style="padding:2px 5px;background:rgba(231,76,60,0.1);border:1px solid #e74c3c44;border-radius:3px;color:#e74c3c;font-size:9px;cursor:pointer;">✕</button>`}
+                </div>
+            </div>
+            <div style="padding:0 8px 4px;font-size:9px;color:#333;font-style:italic;">${guidePreview}</div>
+            <div id="cfr-guide-editor-${k}" style="display:none;padding:6px 8px;border-top:1px solid #1a1a2e;">
+                <textarea id="cfr-guide-ta-${k}" style="width:100%;height:120px;background:#0a0a1a;border:1px solid #2a2a4e;border-radius:3px;color:#aaa;font-size:10px;padding:5px;box-sizing:border-box;resize:vertical;font-family:inherit;">${safeguide}</textarea>
+                <button onclick="cfrSaveGuide('${k}')" style="margin-top:4px;padding:3px 10px;background:rgba(46,204,113,0.15);border:1px solid #2ecc71;border-radius:3px;color:#2ecc71;font-size:10px;cursor:pointer;">💾 Save Guide</button>
+            </div>
+        </div>`;
+    }
+
     let html = '';
 
-    // Base — read-only, shown as reference
-    html += `<div style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Core (${Object.keys(base).length})</div>`;
-    html += `<div style="max-height:100px;overflow-y:auto;margin-bottom:10px;padding:4px;background:rgba(0,0,0,0.2);border-radius:4px;">`;
-    for (const [k, v] of Object.entries(base)) {
-        html += `<div style="font-size:10px;color:#555;padding:1px 0;">${v}</div>`;
-    }
-    html += `</div>`;
-
-    // Custom — deletable
+    // ── Custom constellations (full cards with delete) ────────
     const customKeys = Object.keys(custom);
-    html += `<div style="font-size:10px;color:#e94560;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Custom (${customKeys.length})</div>`;
-
-    if (!customKeys.length) {
-        html += `<div style="font-size:10px;color:#333;font-style:italic;padding:6px 0;">No custom constellations yet</div>`;
-    } else {
+    if (customKeys.length) {
+        html += `<div style="font-size:10px;color:#e94560;text-transform:uppercase;letter-spacing:1px;margin-bottom:5px;">Custom (${customKeys.length})</div>`;
         for (const [k, data] of Object.entries(custom)) {
-            const perkCount  = cfrPerkDB?.constellations?.[k]?.perks?.length || 0;
-            const hasGuide   = !!data.domain_guide;
-            const guidePreview = hasGuide
-                ? data.domain_guide.slice(0, 80).replace(/</g, "&lt;") + "…"
-                : "No guide yet — create one below";
-            html += `
-            <div style="background:rgba(233,69,96,0.05);border-left:2px solid #e94560;border-radius:0 4px 4px 0;margin-bottom:6px;overflow:hidden;">
-                <div style="display:flex;align-items:center;justify-content:space-between;padding:5px 8px;">
-                    <div style="flex:1;min-width:0;">
-                        <div style="font-size:11px;color:#ddd;font-weight:bold;">${data.label}</div>
-                        <div style="font-size:9px;color:#555;">${data.category || 'Custom'} · ${perkCount} perk${perkCount !== 1 ? 's' : ''} · key: ${k}</div>
-                    </div>
-                    <div style="display:flex;gap:4px;flex-shrink:0;margin-left:6px;">
-                        <button onclick="cfrToggleGuide('${k}')" style="padding:2px 5px;background:rgba(52,152,219,0.1);border:1px solid #3498db44;border-radius:3px;color:#3498db;font-size:9px;cursor:pointer;">📝</button>
-                            <button onclick="cfrRegenerateGuide('${k}')" style="padding:2px 5px;background:rgba(241,196,15,0.1);border:1px solid #f1c40f44;border-radius:3px;color:#f1c40f;font-size:9px;cursor:pointer;">⚡</button>
-                        <button onclick="cfrDeleteConstellation('${k}')" style="padding:2px 5px;background:rgba(231,76,60,0.1);border:1px solid #e74c3c44;border-radius:3px;color:#e74c3c;font-size:9px;cursor:pointer;">✕</button>
-                    </div>
-                </div>
-                <div style="padding:0 8px 4px;font-size:9px;color:#444;font-style:italic;">${guidePreview}</div>
-                <div id="cfr-guide-editor-${k}" style="display:none;padding:6px 8px;border-top:1px solid #1a1a2e;">
-                    <textarea id="cfr-guide-ta-${k}" style="width:100%;height:120px;background:#0a0a1a;border:1px solid #2a2a4e;border-radius:3px;color:#aaa;font-size:10px;padding:5px;box-sizing:border-box;resize:vertical;font-family:inherit;">${(data.domain_guide || '').replace(/</g, "&lt;")}</textarea>
-                    <button onclick="cfrSaveGuide('${k}')" style="margin-top:4px;padding:3px 10px;background:rgba(46,204,113,0.15);border:1px solid #2ecc71;border-radius:3px;color:#2ecc71;font-size:10px;cursor:pointer;">💾 Save Guide</button>
-                </div>
-            </div>`;
+            html += renderCard(k, data.label || k, data.category || 'Custom', data.domain_guide || '', false);
         }
+    } else {
+        html += `<div style="font-size:10px;color:#333;font-style:italic;padding:0 0 8px;">No custom constellations yet</div>`;
     }
+
+    // ── Base constellations (collapsible, no delete) ──────────
+    html += `
+    <details style="margin-top:6px;">
+        <summary style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;padding:3px 0;">
+            <span style="color:#555;">▸</span> Core Constellations (${Object.keys(base).length}) — click to expand / edit guides
+        </summary>
+        <div style="margin-top:6px;">`;
+
+    for (const [k, label] of Object.entries(base)) {
+        const existingTheme = cfrPerkDB?.constellations?.[k]?.theme || '';
+        html += renderCard(k, label, 'Core', existingTheme, true);
+    }
+
+    html += `</div></details>`;
 
     el.innerHTML = html;
 }
@@ -2099,7 +2132,11 @@ function checkAndNotifyBank() {
 // ============================================================
 
 function getRollPanelHTML() {
-    const constellationOptions = Object.entries(CFR_CONSTELLATIONS)
+    // Use getActiveConstellations() so custom entries appear if DB is already loaded
+    // If called before gistLoad, falls back to base-only — refreshConstellationDropdowns
+    // will update the live element after Gist resolves anyway
+    const active = getActiveConstellations();
+    const constellationOptions = Object.entries(active)
         .map(([k, v]) => `<option value="${k}">${v}</option>`)
         .join('');
 
@@ -4174,10 +4211,12 @@ jQuery(async () => {
             updateBankedList();
             updatePromptInjection();
             updateProfileUI();
-        console.log('[CFR] ☁️ Gist sync complete on init');
+            refreshConstellationDropdowns(); // ensure custom constellations appear in roll panel
+            console.log('[CFR] ☁️ Gist sync complete on init');
         }).catch(e => console.warn('[CFR] Gist init load failed:', e));
     } else {
         cfrPerkDB = buildEmptyDB();
+        refreshConstellationDropdowns(); // populate dropdown with base constellations grouped
         console.log('[CFR] ℹ️ No Gist configured — using local DB only. Add Gist ID + PAT in Settings.');
     }
 
