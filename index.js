@@ -1376,14 +1376,14 @@ async function dbAddPerk(constellationKey, perkData) {
 
 // ── AI GUIDE GENERATION ──────────────────────────────────────
 
-async function generateConstellationGuide(key, label, category) {
+async function generateConstellationGuide(key, label, category, sources) {
     const prompt = `You are defining the design space for a Celestial Forge perk constellation.
 
 Celestial Forge is a jumpchain fanfiction concept where a protagonist randomly acquires crafting and technology abilities from fictional universes by accumulating Creation Points (CP). Perks belong to constellations (thematic domains) and have costs ranging from 50 CP (Tier 1 - Foundation) to 700+ CP (Tier 6 - Mythic).
 
 Constellation to define:
 NAME: ${label}
-CATEGORY: ${category}
+CATEGORY: ${category}${sources ? `\nSOURCES / DRAW FROM: ${sources}` : ''}
 
 Write a concise domain guide covering:
 
@@ -1437,7 +1437,10 @@ window.cfrRegenerateGuide = async function(key) {
         statusEl.className   = 'cfr-status-msg ok';
     }
 
-    const guide = await generateConstellationGuide(key, custom.label, custom.category);
+    const existingSources = CFR_CONSTELLATIONS[key]
+        ? (cfrPerkDB?.constellations?.[key]?.sources || '')
+        : (cfrPerkDB?.custom_constellations?.[key]?.sources || '');
+    const guide = await generateConstellationGuide(key, custom.label, custom.category, existingSources);
     if (guide) {
         // ── Drop into textarea for review — do NOT write to Gist yet ──
         // Ensure the editor panel exists in the DOM
@@ -1486,16 +1489,21 @@ window.cfrSaveGuide = async function(key) {
     const isBase     = !!CFR_CONSTELLATIONS[key];
     let label        = '';
 
+    const sourcesEl  = document.getElementById(`cfr-sources-ta-${key}`);
+    const sourcesText = sourcesEl ? sourcesEl.value.trim() : null;
+
     if (isBase) {
-        // Base constellation — write to constellations[key].theme
+        // Base constellation — write to constellations[key].theme + sources
         if (!cfrPerkDB.constellations) cfrPerkDB.constellations = {};
         if (!cfrPerkDB.constellations[key]) cfrPerkDB.constellations[key] = { domain: '', theme: '', perks: [] };
         cfrPerkDB.constellations[key].theme = guideText;
+        if (sourcesText !== null) cfrPerkDB.constellations[key].sources = sourcesText;
         label = CFR_CONSTELLATIONS[key];
     } else {
-        // Custom constellation — write to custom_constellations[key].domain_guide
+        // Custom constellation — write to custom_constellations[key].domain_guide + sources
         if (!cfrPerkDB.custom_constellations?.[key]) return;
         cfrPerkDB.custom_constellations[key].domain_guide = guideText;
+        if (sourcesText !== null) cfrPerkDB.custom_constellations[key].sources = sourcesText;
         label = cfrPerkDB.custom_constellations[key].label;
     }
 
@@ -1563,7 +1571,8 @@ async function dbAddConstellation(label, category) {
             statusEl.textContent = `⏳ Generating domain guide for "${label}" via ST connection…`;
             statusEl.className   = 'cfr-status-msg ok';
         }
-        generateConstellationGuide(key, label.trim(), category || 'Custom').then(guide => {
+        const newSources = cfrPerkDB?.custom_constellations?.[key]?.sources || '';
+        generateConstellationGuide(key, label.trim(), category || 'Custom', newSources).then(guide => {
             if (guide && cfrPerkDB?.custom_constellations?.[key]) {
                 // Refresh list first so textarea element exists in DOM
                 updateConstellationManagerList();
@@ -1664,6 +1673,10 @@ function updateConstellationManagerList() {
             : 'No guide — hit 📝 to write or ⚡ to generate';
         const borderColor  = isBase ? '#3a3a5c' : '#e94560';
         const safeguide    = (guideText || '').replace(/</g, '&lt;').replace(/`/g, '\`');
+        const rawSources   = isBase
+            ? (cfrPerkDB?.constellations?.[k]?.sources || '')
+            : (cfrPerkDB?.custom_constellations?.[k]?.sources || '');
+        const safesources  = rawSources.replace(/</g, '&lt;').replace(/`/g, '\`');
 
         return `
         <div style="background:rgba(255,255,255,0.02);border-left:2px solid ${borderColor};border-radius:0 4px 4px 0;margin-bottom:5px;overflow:hidden;">
@@ -1680,8 +1693,12 @@ function updateConstellationManagerList() {
             </div>
             <div style="padding:0 8px 4px;font-size:9px;color:#333;font-style:italic;">${guidePreview}</div>
             <div id="cfr-guide-editor-${k}" style="display:none;padding:6px 8px;border-top:1px solid #1a1a2e;">
-                <textarea id="cfr-guide-ta-${k}" style="width:100%;height:120px;background:#0a0a1a;border:1px solid #2a2a4e;border-radius:3px;color:#aaa;font-size:10px;padding:5px;box-sizing:border-box;resize:vertical;font-family:inherit;">${safeguide}</textarea>
-                <button onclick="cfrSaveGuide('${k}')" style="margin-top:4px;padding:3px 10px;background:rgba(46,204,113,0.15);border:1px solid #2ecc71;border-radius:3px;color:#2ecc71;font-size:10px;cursor:pointer;">💾 Save Guide</button>
+                <div style="font-size:9px;color:#555;text-transform:uppercase;letter-spacing:1px;margin-bottom:3px;">Domain Guide</div>
+                <textarea id="cfr-guide-ta-${k}" style="width:100%;height:110px;background:#0a0a1a;border:1px solid #2a2a4e;border-radius:3px;color:#aaa;font-size:10px;padding:5px;box-sizing:border-box;resize:vertical;font-family:inherit;">${safeguide}</textarea>
+                <div style="font-size:9px;color:#555;text-transform:uppercase;letter-spacing:1px;margin:7px 0 3px;">Sources / Additional Context</div>
+                <textarea id="cfr-sources-ta-${k}" placeholder="e.g. Overlord LN vols 1-14 — YGGDRASIL item crafting, Ainz's gear; or: this SB fic uses a point-buy system where..." style="width:100%;height:52px;background:#0a0a1a;border:1px solid #2a2a4e;border-radius:3px;color:#8a8aaa;font-size:10px;padding:5px;box-sizing:border-box;resize:vertical;font-family:inherit;">${safesources}</textarea>
+                <div style="font-size:9px;color:#2a2a3e;font-style:italic;margin:3px 0 5px;line-height:1.3;">Feeds into perk generation and guide regeneration. Wiki links, arc names, specific characters, fic titles — directs the AI toward the right material.</div>
+                <button onclick="cfrSaveGuide('${k}')" style="margin-top:2px;padding:3px 10px;background:rgba(46,204,113,0.15);border:1px solid #2ecc71;border-radius:3px;color:#2ecc71;font-size:10px;cursor:pointer;">💾 Save Guide &amp; Sources</button>
             </div>
         </div>`;
     }
@@ -1793,6 +1810,7 @@ function buildCreationPrompt(constellationKey, tier) {
     // Base constellations can have a theme set manually in the DB
     const customEntry = cfrPerkDB?.custom_constellations?.[constellationKey];
     const theme       = customEntry?.domain_guide || constData?.theme || '';
+    const sources     = customEntry?.sources      || constData?.sources || '';
     const existing  = (constData?.perks || []).map(p => p.name).join(', ') || 'none yet';
     const tierLabel = CFR_TIER_LABELS[tier] || 'Expert';
     const cpRanges  = ['','50-100','100-200','200-350','350-500','500-700','700-1000'];
@@ -1807,7 +1825,7 @@ function buildCreationPrompt(constellationKey, tier) {
 A Celestial Forge Creation Roll has been triggered. YOUR FIRST PRIORITY in this response is to generate the perk below, weaving it naturally into the narrative. Do not skip or defer this step.
 
 CONSTELLATION: ${label}
-DOMAIN THEME: ${theme}
+DOMAIN THEME: ${theme || '(no guide set — use constellation name and category to infer appropriate ability space)'}${sources ? `\nADDITIONAL SOURCES / CONTEXT: ${sources}` : ''}
 TIER: ${tier} - ${tierLabel}
 CP COST RANGE: ${cpRange} CP
 PLAYER CURRENT CP: ${available}
