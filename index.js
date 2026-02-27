@@ -199,23 +199,31 @@ class CelestialForgeTracker {
 
     // ── PERK MANAGEMENT ──────────────────────────────────────
 
-    makeScaling(data) {
+    makeScaling(data, active) {
+        // active: whether this perk is currently accumulating XP
+        // If not passed, infer from existing data or global state
+        const isActive = active !== undefined
+            ? active
+            : !!(data?.scaling?.scaling_active ?? this.state.has_gamer);
+
         const base = {
-            level:     1,
-            maxLevel:  this.state.has_uncapped ? 999 : 10,
-            xp:        0,
-            xp_needed: 10,
-            xp_percent: 0,
-            uncapped:  this.state.has_uncapped
+            level:          1,
+            maxLevel:       this.state.has_uncapped ? 999 : 10,
+            xp:             0,
+            xp_needed:      10,
+            xp_percent:     0,
+            uncapped:       this.state.has_uncapped,
+            scaling_active: isActive
         };
         if (data?.scaling && typeof data.scaling === 'object') {
             return {
-                level:     data.scaling.level     || base.level,
-                maxLevel:  this.state.has_uncapped ? 999 : (data.scaling.maxLevel || base.maxLevel),
-                xp:        data.scaling.xp        || 0,
-                xp_needed: data.scaling.xp_needed || ((data.scaling.level||1) * 10),
-                xp_percent: data.scaling.xp_percent || 0,
-                uncapped:  this.state.has_uncapped || data.scaling.uncapped || false
+                level:          data.scaling.level          || base.level,
+                maxLevel:       this.state.has_uncapped ? 999 : (data.scaling.maxLevel || base.maxLevel),
+                xp:             data.scaling.xp             || 0,
+                xp_needed:      data.scaling.xp_needed      || ((data.scaling.level||1) * 10),
+                xp_percent:     data.scaling.xp_percent     || 0,
+                uncapped:       this.state.has_uncapped     || data.scaling.uncapped || false,
+                scaling_active: data.scaling.scaling_active ?? isActive
             };
         }
         return base;
@@ -226,7 +234,11 @@ class CelestialForgeTracker {
         const flags = Array.isArray(data.flags)
             ? data.flags.map(f => f.toUpperCase())
             : [];
-        const hasScaling = flags.includes('SCALING') || !!data.scaling;
+        // Every perk gets a scaling scaffold — dormant until SCALING flag or GAMER activates
+        const scalingActive = flags.includes('SCALING')
+            || flags.includes('UNCAPPED')
+            || this.state.has_gamer
+            || !!data.scaling?.scaling_active;
         return {
             name:               (data.name || 'Unknown').trim(),
             cost:               parseInt(data.cost) || 0,
@@ -235,7 +247,8 @@ class CelestialForgeTracker {
             scaling_description:data.scaling_description || null,
             toggleable:         flags.includes('TOGGLEABLE'),
             active:             data.active !== false,
-            scaling:            hasScaling ? this.makeScaling(data) : null,
+            // Always present — dormant when scaling_active:false
+            scaling:            this.makeScaling(data, scalingActive),
             db_id:              data.db_id || null,      // hard link back to DB entry
             acquired_at:        data.acquired_at || Date.now(),
             acquired_response:  data.acquired_response || this.state.response_count
@@ -257,10 +270,9 @@ class CelestialForgeTracker {
 
         const perk = this.buildPerk(data);
 
-        // If GAMER already active, new perk gets scaling regardless of its flags
-        if (this.state.has_gamer && !perk.scaling) {
-            perk.flags = [...new Set([...perk.flags, 'SCALING'])];
-            perk.scaling = this.makeScaling({});
+        // If GAMER already active, activate the scaffold buildPerk already created
+        if (this.state.has_gamer && perk.scaling && !perk.scaling.scaling_active) {
+            perk.scaling.scaling_active = true;
         }
         // If UNCAPPED already active, new scaling perks start uncapped
         if (this.state.has_uncapped && perk.scaling) {
@@ -324,7 +336,24 @@ class CelestialForgeTracker {
             this.applyGamer();
         }
 
-        const hasScaling = flags.includes('SCALING') || !!updates.scaling || !!perk.scaling;
+        // scalingActive: whether XP should accumulate — requires SCALING flag, GAMER, or explicit override
+        const scalingActive = flags.includes('SCALING')
+            || flags.includes('UNCAPPED')
+            || this.state.has_gamer
+            || perk.scaling?.scaling_active
+            || !!updates.scaling?.scaling_active;
+
+        // Merge incoming updates with existing scaling so nothing is lost
+        const mergedScalingData = {
+            ...perk,
+            scaling: {
+                ...(perk.scaling || {}),
+                ...(updates.scaling || {}),
+                // Flat level/xp overrides from the edit form
+                ...(updates.level !== undefined ? { level: parseInt(updates.level) || 1 } : {}),
+                ...(updates.xp    !== undefined ? { xp:    parseInt(updates.xp)    || 0 } : {})
+            }
+        };
 
         this.state.acquired_perks[idx] = {
             ...perk,
@@ -334,19 +363,11 @@ class CelestialForgeTracker {
             description: updates.description ?? perk.description,
             toggleable:  flags.includes('TOGGLEABLE'),
             active:      updates.active      ?? perk.active,
-            scaling:     hasScaling
-                ? this.makeScaling({ ...perk, ...updates })
-                : null
+            scaling:     this.makeScaling(mergedScalingData, scalingActive)
         };
 
-        // If level/XP overridden directly
-        if (hasScaling && this.state.acquired_perks[idx].scaling) {
-            if (updates.level !== undefined)
-                this.state.acquired_perks[idx].scaling.level = parseInt(updates.level) || 1;
-            if (updates.xp !== undefined)
-                this.state.acquired_perks[idx].scaling.xp = parseInt(updates.xp) || 0;
-            this.recalcScalingPerk(this.state.acquired_perks[idx]);
-        }
+        // Recalc xp_needed / xp_percent after any edit
+        this.recalcScalingPerk(this.state.acquired_perks[idx]);
 
         this.calcTotals();
         this.save();
@@ -495,23 +516,23 @@ class CelestialForgeTracker {
     applyUncapped() {
         this.state.has_uncapped = true;
         for (const p of this.state.acquired_perks) {
-            // If GAMER is also active, ALL perks get scaling (including PASSIVE)
-            // Otherwise only perks already flagged SCALING get the uncap treatment
-            const shouldScale = this.state.has_gamer
+            if (!p.scaling) {
+                // Safe fallback — universal scaffold means this shouldn't happen
+                const active = this.state.has_gamer
+                    || p.flags.includes('SCALING')
+                    || p.flags.includes('UNCAPPED');
+                p.scaling = this.makeScaling({}, active);
+            }
+            // Activate if GAMER is on OR perk already has SCALING/UNCAPPED flag
+            const shouldActivate = this.state.has_gamer
                 || p.flags.includes('SCALING')
                 || p.flags.includes('UNCAPPED');
+            if (shouldActivate) p.scaling.scaling_active = true;
 
-            if (shouldScale && !p.scaling) {
-                // Retroactively add scaling object to perk that lacked one
-                p.flags = [...new Set([...p.flags, 'SCALING'])];
-                p.scaling = this.makeScaling({});
-            }
-            if (p.scaling) {
-                p.scaling.maxLevel = 999;
-                p.scaling.uncapped = true;
-            }
+            p.scaling.maxLevel = 999;
+            p.scaling.uncapped = true;
         }
-        this.log('⚡ UNCAPPED active — all eligible perks unlimited');
+        this.log('⚡ UNCAPPED active — level caps removed');
     }
 
     // Per-perk scaling override — doesn't touch global flags
@@ -561,19 +582,20 @@ class CelestialForgeTracker {
 
     applyGamer() {
         this.state.has_gamer = true;
-        // Retroactively give ALL acquired perks a scaling object
+        // Every perk already has a scaffold — just activate it
         for (const p of this.state.acquired_perks) {
             if (!p.scaling) {
-                p.flags = [...new Set([...p.flags, 'SCALING'])];
-                p.scaling = this.makeScaling({});
+                // Shouldn't happen with universal scaffold, but safe fallback
+                p.scaling = this.makeScaling({}, true);
             }
-            // If UNCAPPED is also active, immediately uncap the new scaling object
-            if (this.state.has_uncapped && p.scaling) {
+            p.scaling.scaling_active = true;
+            // If UNCAPPED is also active, uncap simultaneously
+            if (this.state.has_uncapped) {
                 p.scaling.maxLevel = 999;
                 p.scaling.uncapped = true;
             }
         }
-        this.log('🎮 GAMER active — all perks can now gain XP and level');
+        this.log('🎮 GAMER active — all perks now gain XP and level');
     }
 
     // ── XP / LEVELS ──────────────────────────────────────────
@@ -587,20 +609,26 @@ class CelestialForgeTracker {
     }
 
     addXP(perkName, amount) {
-        // Find perk — if GAMER active, any perk can receive XP
         let perk = this.state.acquired_perks.find(p =>
             p.name.toLowerCase() === perkName.toLowerCase()
         );
         if (!perk) return null;
 
-        // If perk doesn't have scaling yet, auto-add it when GAMER is active
+        // Ensure scaffold exists (universal, but guard anyway)
         if (!perk.scaling) {
-            if (this.state.has_gamer || perk.flags.includes('SCALING')) {
-                perk.scaling = this.makeScaling({});
-                if (!perk.flags.includes('SCALING')) perk.flags.push('SCALING');
-            } else {
-                return null; // non-SCALING perk without GAMER — ignore XP
-            }
+            const active = this.state.has_gamer || perk.flags.includes('SCALING');
+            perk.scaling = this.makeScaling({}, active);
+        }
+
+        // Only accumulate XP if scaling is active for this perk
+        if (!perk.scaling.scaling_active
+            && !this.state.has_gamer
+            && !perk.flags.includes('SCALING')) {
+            return null; // dormant — ignore XP until activated
+        }
+        // Activate if GAMER just kicked in and scaffold was dormant
+        if (this.state.has_gamer && !perk.scaling.scaling_active) {
+            perk.scaling.scaling_active = true;
         }
 
         perk.scaling.xp += amount;
@@ -2890,6 +2918,7 @@ function getCFRSettingsHtml() {
               <div class="cfr-flag-grid" id="cfr-edit-flags">${editFlagCheckboxes}</div>
             </div>
             <div class="cfr-scaling-fields" id="cfr-edit-scaling-fields">
+              <div id="cfr-scaling-dormant-note" style="display:none;font-size:10px;color:#f1c40f;background:rgba(241,196,15,0.08);border:1px solid #f1c40f33;border-radius:3px;padding:4px 7px;margin-bottom:5px;">Dormant scaffold — values saved, active once SCALING flag added or GAMER unlocks</div>
               <div class="cfr-form-field">
                 <label>Level</label>
                 <input type="number" id="cfr-edit-level" min="1" value="1" />
@@ -3140,17 +3169,24 @@ function updateTrackerUI() {
 
         let scaling = '';
         if (p.scaling) {
-            const unc  = p.scaling.uncapped;
-            const maxS = unc ? '∞' : p.scaling.maxLevel;
-            const pct  = p.scaling.xp_percent || 0;
-            scaling = `
+            const active = p.scaling.scaling_active;
+            const unc    = p.scaling.uncapped;
+            const maxS   = unc ? '∞' : p.scaling.maxLevel;
+            const pct    = p.scaling.xp_percent || 0;
+            if (active) {
+                const labelCls = unc ? 'unc' : '';
+                const fillCls  = unc ? 'unc' : '';
+                scaling = `
                 <div class="cfr-scaling-bar">
-                  <span class="cfr-scaling-label ${unc?'unc':''}">Lv.${p.scaling.level}/${maxS}</span>
+                  <span class="cfr-scaling-label ${labelCls}">Lv.${p.scaling.level}/${maxS}</span>
                   <div class="cfr-scaling-progress">
-                    <div class="cfr-scaling-fill ${unc?'unc':''}" style="width:${pct}%"></div>
+                    <div class="cfr-scaling-fill ${fillCls}" style="width:${pct}%"></div>
                   </div>
                   <span class="cfr-scaling-xp">${p.scaling.xp}/${p.scaling.xp_needed} XP</span>
                 </div>`;
+            } else {
+                scaling = `<div class="cfr-scaling-bar" style="opacity:0.3;"><span class="cfr-scaling-label" style="color:#444;">Lv.${p.scaling.level} dormant</span><div class="cfr-scaling-progress"><div class="cfr-scaling-fill" style="width:0%"></div></div><span class="cfr-scaling-xp" style="color:#333;">— XP</span></div>`;
+            }
         }
 
         let toggle = '';
@@ -3334,9 +3370,11 @@ function updateHUD() {
 
         let scaling = '';
         if (p.scaling) {
-            const pct = p.scaling.xp_percent || 0;
-            const maxL= p.scaling.uncapped ? '∞' : p.scaling.maxLevel;
-            scaling = `
+            const active = p.scaling.scaling_active;
+            const pct    = p.scaling.xp_percent || 0;
+            const maxL   = p.scaling.uncapped ? '∞' : p.scaling.maxLevel;
+            if (active) {
+                scaling = `
                 <div style="margin-top:4px;">
                   <div style="display:flex;justify-content:space-between;font-size:10px;color:#2ecc71;margin-bottom:2px;">
                     <span>Lv.${p.scaling.level}/${maxL}</span>
@@ -3346,6 +3384,9 @@ function updateHUD() {
                     <div style="height:100%;width:${pct}%;background:#2ecc71;"></div>
                   </div>
                 </div>`;
+            } else {
+                scaling = `<div style="margin-top:3px;font-size:9px;color:#333;font-style:italic;">Lv.${p.scaling.level} dormant</div>`;
+            }
         }
 
         return `
@@ -3630,23 +3671,28 @@ function bindManualControls() {
             $(this).prop('checked', perk.flags.includes(this.value));
         });
 
-        // Scaling fields
-        const hasScaling = perk.flags.includes('SCALING') || !!perk.scaling;
-        $('#cfr-edit-scaling-fields').toggleClass('visible', hasScaling);
-        if (perk.scaling) {
-            $('#cfr-edit-level').val(perk.scaling.level);
-            $('#cfr-edit-xp').val(perk.scaling.xp);
-        }
+        // Scaling fields — every perk has a scaffold; show always, dim if dormant
+        const isActive = perk.scaling?.scaling_active || perk.flags.includes('SCALING') || perk.flags.includes('UNCAPPED');
+        $('#cfr-edit-scaling-fields').addClass('visible');
+        $('#cfr-edit-level').val(perk.scaling?.level || 1);
+        $('#cfr-edit-xp').val(perk.scaling?.xp || 0);
+        $('#cfr-edit-scaling-fields').css('opacity', isActive ? '1' : '0.4');
+        const dormantNote = document.getElementById('cfr-scaling-dormant-note');
+        if (dormantNote) dormantNote.style.display = isActive ? 'none' : 'block';
 
         $('#cfr-edit-form').show();
         // Update per-perk override status indicators
         refreshPerkOverrideStatus(perk);
     });
 
-    // Show/hide scaling on flag toggle
+    // On flag toggle — keep scaling fields always visible, update dormant state
     $(document).on('change', '#cfr-edit-flags .cfr-edit-flag', function() {
-        const hasScaling = $('#cfr-edit-flags input[value="SCALING"]').prop('checked');
-        $('#cfr-edit-scaling-fields').toggleClass('visible', hasScaling);
+        const flagActive = $('#cfr-edit-flags input[value="SCALING"]').prop('checked')
+            || $('#cfr-edit-flags input[value="UNCAPPED"]').prop('checked');
+        // Always visible — just change opacity to signal dormant vs active
+        $('#cfr-edit-scaling-fields').addClass('visible').css('opacity', flagActive ? '1' : '0.4');
+        const dormantNote = document.getElementById('cfr-scaling-dormant-note');
+        if (dormantNote) dormantNote.style.display = flagActive ? 'none' : 'block';
     });
 
     $('#cfr-btn-save-edit').on('click', () => {
@@ -3656,15 +3702,15 @@ function bindManualControls() {
         const flags = [];
         $('#cfr-edit-flags .cfr-edit-flag:checked').each((_, el) => flags.push(el.value));
 
-        const hasScaling = flags.includes('SCALING');
+        // Always capture level/xp — every perk has a scaffold now
         const updates = {
             name:        $('#cfr-edit-name').val().trim() || original,
             cost:        parseInt($('#cfr-edit-cost').val()) || 0,
             description: $('#cfr-edit-desc').val().trim(),
             flags,
             active:      $('#cfr-edit-active').prop('checked'),
-            level:       hasScaling ? parseInt($('#cfr-edit-level').val()) || 1  : undefined,
-            xp:          hasScaling ? parseInt($('#cfr-edit-xp').val())   || 0  : undefined
+            level:       parseInt($('#cfr-edit-level').val()) || 1,
+            xp:          parseInt($('#cfr-edit-xp').val())   || 0
         };
 
         const result = cfrTracker.editPerk(original, updates);
