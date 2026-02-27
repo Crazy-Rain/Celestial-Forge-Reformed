@@ -357,13 +357,17 @@ class CelestialForgeTracker {
 
         this.state.acquired_perks[idx] = {
             ...perk,
-            name:        updates.name        ?? perk.name,
-            cost:        parseInt(updates.cost) || perk.cost,
+            name:               updates.name        ?? perk.name,
+            cost:               parseInt(updates.cost) || perk.cost,
             flags,
-            description: updates.description ?? perk.description,
-            toggleable:  flags.includes('TOGGLEABLE'),
-            active:      updates.active      ?? perk.active,
-            scaling:     this.makeScaling(mergedScalingData, scalingActive)
+            description:        updates.description ?? perk.description,
+            // Only overwrite scaling_description if caller explicitly passed a non-null value
+            scaling_description: updates.scaling_description !== undefined
+                ? (updates.scaling_description ?? perk.scaling_description)
+                : perk.scaling_description,
+            toggleable:          flags.includes('TOGGLEABLE'),
+            active:              updates.active      ?? perk.active,
+            scaling:             this.makeScaling(mergedScalingData, scalingActive)
         };
 
         // Recalc xp_needed / xp_percent after any edit
@@ -1563,6 +1567,50 @@ window.cfrToggleGuide = function(key) {
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
 };
 
+// ── PERK LEVEL DESCRIPTOR GENERATION ────────────────────────
+
+async function generatePerkScalingDesc(perk) {
+    const ctx = SillyTavern.getContext();
+    if (typeof ctx.generateQuietPrompt !== 'function') return null;
+
+    const isUncapped = perk.flags?.includes('UNCAPPED') || perk.scaling?.uncapped;
+    const tier = perk.cost
+        ? (perk.cost <= 100 ? 1 : perk.cost <= 200 ? 2 : perk.cost <= 350 ? 3 :
+           perk.cost <= 500 ? 4 : perk.cost <= 700 ? 5 : 6)
+        : 3;
+    const tierLabel = CFR_TIER_LABELS[tier] || 'Expert';
+
+    const prompt = `You are writing scaling tier descriptors for a Celestial Forge perk.
+
+PERK: ${perk.name}
+COST: ${perk.cost} CP (Tier ${tier} — ${tierLabel})
+FLAGS: ${(perk.flags || []).join(', ') || 'none'}
+DESCRIPTION: ${perk.description || '(no description)'}
+
+Write concise scaling descriptors showing how this perk grows with mastery.
+Each tier should feel meaningfully different — not just "better version of the same thing."
+Ground each tier in specific capabilities, not vague power adjectives.
+
+Respond ONLY with the scaling lines, no preamble, in EXACTLY this format:
+1-3: [What the perk does at beginner mastery — specific, functional, grounded]
+4-6: [Journeyman mastery — notable increase in scope, precision, or utility]
+7-9: [Expert mastery — signature capability, recognizable as potent]
+10: [Apex mastery — peak of what this perk can achieve within defined limits]`
+        + (isUncapped ? '\nUNCAPPED: [Diminishing-returns behavior past level 10 — marginal refinement, not a new tier]' : '')
+        + `
+UNCAPPED: [Diminishing-returns behavior past level 10 — describe marginal refinement, not a new tier]' : ''}
+
+No headers, no explanation, no blank lines between tiers. Just the ` + (isUncapped ? 'five' : 'four') + ` lines.`;
+
+    try {
+        const result = await ctx.generateQuietPrompt(prompt, false, true);
+        return result?.trim() || null;
+    } catch(e) {
+        console.error('[CFR] Scaling descriptor generation failed:', e);
+        return null;
+    }
+}
+
 // Add a brand-new constellation to the DB (custom only)
 async function dbAddConstellation(label, category) {
     if (!cfrPerkDB) cfrPerkDB = buildEmptyDB();
@@ -2067,6 +2115,17 @@ function extractDescriptionFromText(text, perkName) {
     const cleaned  = after.replace(/```forge[\s\S]*?```/g, '').trim();
     const paragraphs = cleaned.split(/\n\n+/).filter(p => p.trim().length > 20).slice(0, 3);
     return paragraphs.join('\n\n').trim();
+}
+
+// Serialize a scaling_description object back to the editable text format
+function scalingDescToText(sd) {
+    if (!sd || typeof sd !== 'object') return '';
+    const lines = [];
+    for (const [key, val] of Object.entries(sd)) {
+        if (key !== 'uncapped') lines.push(`${key}: ${val}`);
+    }
+    if (sd['uncapped']) lines.push(`UNCAPPED: ${sd['uncapped']}`);
+    return lines.join('\n');
 }
 
 function extractScalingDescription(text) {
@@ -2932,8 +2991,30 @@ function getCFRSettingsHtml() {
               <label style="font-size:11px;">Active:</label>
               <input type="checkbox" id="cfr-edit-active" checked />
             </div>
+            <!-- Scaling tier descriptors -->
+            <div id="cfr-edit-scaling-desc-section" style="display:none;margin-top:8px;">
+              <div style="font-size:10px;color:#2ecc71;text-transform:uppercase;letter-spacing:1px;margin-bottom:4px;">Level Descriptors</div>
+              <div id="cfr-scaling-desc-missing" style="display:none;font-size:10px;color:#f1c40f;background:rgba(241,196,15,0.07);border:1px solid #f1c40f33;border-radius:3px;padding:4px 7px;margin-bottom:5px;">No level descriptors yet — the AI won't know what each level feels like for this perk.</div>
+              <textarea id="cfr-edit-scaling-desc" placeholder="1-3: Basic control...
+4-6: Refined technique...
+7-9: Expert mastery...
+10: Apex capability...
+UNCAPPED: Marginal refinement per level..." style="width:100%;height:90px;background:#0a0a1a;border:1px solid #2a2a4e;border-radius:3px;color:#aaa;font-size:10px;padding:5px;box-sizing:border-box;resize:vertical;font-family:monospace;"></textarea>
+              <div class="cfr-btn-row" style="margin-top:4px;">
+                <input type="button" class="menu_button" id="cfr-btn-gen-scaling-desc" value="✨ Generate Level Descriptors" />
+              </div>
+              <div id="cfr-scaling-desc-status" class="cfr-status-msg" style="margin-top:4px;"></div>
+            </div>
             <div class="cfr-btn-row" style="margin-top:8px;">
               <input type="button" class="menu_button" id="cfr-btn-save-edit" value="💾 Save Changes" />
+            </div>
+            <!-- Option 5: post-save generate prompt -->
+            <div id="cfr-post-save-gen-prompt" style="display:none;margin-top:6px;padding:6px 8px;background:rgba(241,196,15,0.07);border:1px solid #f1c40f44;border-radius:4px;">
+              <div style="font-size:10px;color:#f1c40f;margin-bottom:5px;">This perk has no level descriptors. Generate them now?</div>
+              <div style="display:flex;gap:5px;">
+                <button id="cfr-post-save-yes" style="flex:1;padding:3px 0;background:rgba(46,204,113,0.15);border:1px solid #2ecc71;border-radius:3px;color:#2ecc71;font-size:10px;cursor:pointer;">✨ Generate</button>
+                <button id="cfr-post-save-no" style="flex:1;padding:3px 0;background:#1a1a2e;border:1px solid #333;border-radius:3px;color:#555;font-size:10px;cursor:pointer;">Not now</button>
+              </div>
             </div>
             <div style="border-top:1px solid #1a1a2e;margin-top:10px;padding-top:8px;">
               <div style="font-size:10px;color:#888;margin-bottom:6px;text-transform:uppercase;letter-spacing:1px;">Per-Perk Overrides</div>
@@ -3680,6 +3761,20 @@ function bindManualControls() {
         const dormantNote = document.getElementById('cfr-scaling-dormant-note');
         if (dormantNote) dormantNote.style.display = isActive ? 'none' : 'block';
 
+        // Scaling descriptor section — show when perk has active scaling
+        const hasActiveScaling = isActive; // reuse from above
+        const sd = perk.scaling_description;
+        const hasSd = sd && typeof sd === 'object' && Object.keys(sd).length > 0;
+        const descSection = document.getElementById('cfr-edit-scaling-desc-section');
+        const descMissing = document.getElementById('cfr-scaling-desc-missing');
+        const descTa      = document.getElementById('cfr-edit-scaling-desc');
+        if (descSection) descSection.style.display = hasActiveScaling ? 'block' : 'none';
+        if (descMissing) descMissing.style.display = (hasActiveScaling && !hasSd) ? 'block' : 'none';
+        if (descTa)      descTa.value = hasSd ? scalingDescToText(sd) : '';
+        // Hide post-save prompt when loading new perk
+        const postPrompt = document.getElementById('cfr-post-save-gen-prompt');
+        if (postPrompt) postPrompt.style.display = 'none';
+
         $('#cfr-edit-form').show();
         // Update per-perk override status indicators
         refreshPerkOverrideStatus(perk);
@@ -3693,6 +3788,9 @@ function bindManualControls() {
         $('#cfr-edit-scaling-fields').addClass('visible').css('opacity', flagActive ? '1' : '0.4');
         const dormantNote = document.getElementById('cfr-scaling-dormant-note');
         if (dormantNote) dormantNote.style.display = flagActive ? 'none' : 'block';
+        // Show/hide descriptor section based on active scaling
+        const descSection = document.getElementById('cfr-edit-scaling-desc-section');
+        if (descSection) descSection.style.display = flagActive ? 'block' : 'none';
     });
 
     $('#cfr-btn-save-edit').on('click', () => {
@@ -3703,23 +3801,87 @@ function bindManualControls() {
         $('#cfr-edit-flags .cfr-edit-flag:checked').each((_, el) => flags.push(el.value));
 
         // Always capture level/xp — every perk has a scaffold now
+        const rawSdText  = $('#cfr-edit-scaling-desc').val().trim();
+        const parsedSd   = rawSdText ? extractScalingDescription(rawSdText) : null;
         const updates = {
-            name:        $('#cfr-edit-name').val().trim() || original,
-            cost:        parseInt($('#cfr-edit-cost').val()) || 0,
-            description: $('#cfr-edit-desc').val().trim(),
+            name:               $('#cfr-edit-name').val().trim() || original,
+            cost:               parseInt($('#cfr-edit-cost').val()) || 0,
+            description:        $('#cfr-edit-desc').val().trim(),
             flags,
-            active:      $('#cfr-edit-active').prop('checked'),
-            level:       parseInt($('#cfr-edit-level').val()) || 1,
-            xp:          parseInt($('#cfr-edit-xp').val())   || 0
+            active:             $('#cfr-edit-active').prop('checked'),
+            level:              parseInt($('#cfr-edit-level').val()) || 1,
+            xp:                 parseInt($('#cfr-edit-xp').val())   || 0,
+            scaling_description: parsedSd   // null if textarea empty — tracker preserves existing
         };
 
         const result = cfrTracker.editPerk(original, updates);
         if (result.success) {
             showStatus('cfr-edit-status', '✅ Saved', 'ok');
-            $('#cfr-edit-select').val('').trigger('change');
+            // Option 5 — if saved perk has active scaling but no level descriptors, nudge gently
+            const savedPerk = cfrTracker.state.acquired_perks.find(p => p.name === (updates.name || original));
+            const needsDesc = savedPerk?.scaling?.scaling_active
+                && (!savedPerk.scaling_description || !Object.keys(savedPerk.scaling_description || {}).length)
+                && !rawSdText;
+            const postPrompt = document.getElementById('cfr-post-save-gen-prompt');
+            if (postPrompt) postPrompt.style.display = needsDesc ? 'block' : 'none';
+            // Store perk name for the post-save generate button
+            if (needsDesc) postPrompt.dataset.perkName = updates.name || original;
+            if (!needsDesc) $('#cfr-edit-select').val('').trigger('change');
         } else {
             showStatus('cfr-edit-status', `⚠️ ${result.reason}`, 'err');
         }
+    });
+
+    // ── SCALING DESCRIPTOR GENERATE BUTTON (Option 2) ──
+    $('#cfr-btn-gen-scaling-desc').on('click', async () => {
+        const name = $('#cfr-edit-select').val();
+        if (!name) return;
+        const perk = cfrTracker.state.acquired_perks.find(p => p.name === name);
+        if (!perk) return;
+        showStatus('cfr-scaling-desc-status', '⏳ Generating…', 'ok');
+        $('#cfr-btn-gen-scaling-desc').prop('disabled', true);
+        const text = await generatePerkScalingDesc(perk);
+        $('#cfr-btn-gen-scaling-desc').prop('disabled', false);
+        if (text) {
+            $('#cfr-edit-scaling-desc').val(text);
+            showStatus('cfr-scaling-desc-status', '✅ Generated — review then hit Save Changes to commit', 'ok');
+            // Highlight save button so it's obvious confirmation is needed
+            $('#cfr-btn-save-edit').css({'background':'rgba(241,196,15,0.2)','border-color':'#f1c40f','color':'#f1c40f'});
+        } else {
+            showStatus('cfr-scaling-desc-status', '⚠️ Generation failed — check ST connection', 'err');
+        }
+    });
+
+    // ── POST-SAVE GENERATE PROMPT (Option 5) ──
+    $('#cfr-post-save-yes').on('click', async () => {
+        const postPrompt = document.getElementById('cfr-post-save-gen-prompt');
+        const perkName   = postPrompt?.dataset?.perkName;
+        if (!perkName) return;
+        const perk = cfrTracker.state.acquired_perks.find(p => p.name === perkName);
+        if (!perk) return;
+        postPrompt.innerHTML = '<div style="font-size:10px;color:#888;padding:4px;">⏳ Generating…</div>';
+        const text = await generatePerkScalingDesc(perk);
+        if (text) {
+            // Reload perk into edit form so the textarea is visible and populated
+            $('#cfr-edit-select').val(perkName).trigger('change');
+            $('#cfr-edit-scaling-desc').val(text);
+            showStatus('cfr-scaling-desc-status', '✅ Generated — review then hit Save Changes', 'ok');
+            $('#cfr-btn-save-edit').css({'background':'rgba(241,196,15,0.2)','border-color':'#f1c40f','color':'#f1c40f'});
+            if (postPrompt) postPrompt.style.display = 'none';
+        } else {
+            if (postPrompt) postPrompt.innerHTML = '<div style="font-size:10px;color:#e74c3c;padding:4px;">⚠️ Generation failed. You can try again with ✨ Generate Level Descriptors above.</div>';
+        }
+    });
+
+    $(document).on('click', '#cfr-post-save-no', () => {
+        const postPrompt = document.getElementById('cfr-post-save-gen-prompt');
+        if (postPrompt) postPrompt.style.display = 'none';
+        $('#cfr-edit-select').val('').trigger('change');
+    });
+
+    // Reset save button highlight whenever user edits the descriptor textarea
+    $(document).on('input', '#cfr-edit-scaling-desc', () => {
+        $('#cfr-btn-save-edit').css({'background':'','border-color':'','color':''});
     });
 
     // ── PER-PERK OVERRIDES ──
