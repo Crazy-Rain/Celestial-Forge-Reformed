@@ -1,18 +1,19 @@
 // ============================================================
-//  CELESTIAL FORGE REFORMED  v1.0.0
+//  CELESTIAL FORGE REFORMED  v1.0.1
 //  Single-extension replacement for celestial-forge-tracker
 //  + celestial-forge-hud. No SimTracker dependency.
 //
-//  Features:
-//   • Forge block parsing (canonical AI state checkpoint)
-//   • Narrative XP parsing (all 3 lorebook patterns)
-//   • Level-up detection + GAMER flag full support
-//   • In-chat <details> state injection after every AI message
-//   • Floating HUD panel (draggable)
-//   • Manual controls: add/edit/remove perks + flag editing,
-//     set CP/corruption/sanity, import/export JSON
-//   • Forge block hiding (replaces SimTracker hide feature)
-//   • No `export` — ST non-module compatible
+//  Fixes v1.0.1:
+//   • UNCAPPED/GAMER label text — removed "active" from static HTML
+//   • applyLastForgeBlock — was passing raw string to syncFromForge (crash)
+//   • addPerk — removed name.includes('UNCAPPED') landmine
+//   • extractScalingDescription — regex \n\n\n -> \n\n+ (standard AI spacing)
+//   • scalingDescToText — sorts tier keys numerically before output
+//   • setAvailableCP — removed redundant setTimeout(updatePromptInjection)
+//   • passivePerkScan — uses matchAll, surfaces first unacquired perk
+//   • dbRollPerk — returns shallow copy, not live DB reference
+//   • onChatChanged — debounce guard prevents multi-fire on chat switch
+//   • buildCreationPrompt — calls calcTotals() before reading available_cp
 // ============================================================
 
 const CFR_MODULE = "celestial-forge-reformed";
@@ -124,7 +125,7 @@ let cfrObserver = null;
 
 class CelestialForgeTracker {
     constructor() {
-        this.version = "1.0.0";
+        this.version = "1.0.1";
         this.state   = this.defaultState();
     }
 
@@ -166,16 +167,14 @@ class CelestialForgeTracker {
         this.save();
     }
 
-    // Set available CP to an exact value by adjusting bonus_cp
+    // FIX: Removed redundant setTimeout(updatePromptInjection) — broadcast() already calls it
     setAvailableCP(target) {
         this.calcTotals();
         const needed = target - this.state.available_cp;
         this.state.bonus_cp = Math.max(0, this.state.bonus_cp + needed);
         this.calcTotals();
         this.save();
-        this.broadcast(); // broadcast calls updatePromptInjection
-        // Also push directly in case broadcast is delayed
-        setTimeout(() => updatePromptInjection(), 100);
+        this.broadcast();
     }
 
     addBonusCP(amount) {
@@ -200,8 +199,6 @@ class CelestialForgeTracker {
     // ── PERK MANAGEMENT ──────────────────────────────────────
 
     makeScaling(data, active) {
-        // active: whether this perk is currently accumulating XP
-        // If not passed, infer from existing data or global state
         const isActive = active !== undefined
             ? active
             : !!(data?.scaling?.scaling_active ?? this.state.has_gamer);
@@ -234,7 +231,6 @@ class CelestialForgeTracker {
         const flags = Array.isArray(data.flags)
             ? data.flags.map(f => f.toUpperCase())
             : [];
-        // Every perk gets a scaling scaffold — dormant until SCALING flag or GAMER activates
         const scalingActive = flags.includes('SCALING')
             || flags.includes('UNCAPPED')
             || this.state.has_gamer
@@ -247,9 +243,8 @@ class CelestialForgeTracker {
             scaling_description:data.scaling_description || null,
             toggleable:         flags.includes('TOGGLEABLE'),
             active:             data.active !== false,
-            // Always present — dormant when scaling_active:false
             scaling:            this.makeScaling(data, scalingActive),
-            db_id:              data.db_id || null,      // hard link back to DB entry
+            db_id:              data.db_id || null,
             acquired_at:        data.acquired_at || Date.now(),
             acquired_response:  data.acquired_response || this.state.response_count
         };
@@ -259,9 +254,12 @@ class CelestialForgeTracker {
         const name = (data.name || '').trim();
         if (!name) return { success: false, reason: 'no_name' };
 
-        // Special flags — order matters
         const flags = Array.isArray(data.flags) ? data.flags.map(f=>f.toUpperCase()) : [];
-        if (flags.includes('UNCAPPED') || name.toUpperCase().includes('UNCAPPED')) {
+
+        // FIX: Removed name.toUpperCase().includes('UNCAPPED') — any perk with "uncapped"
+        // in its name (e.g. "Uncapped Potential") would permanently fire the global modifier.
+        // Flag-only check is the correct signal.
+        if (flags.includes('UNCAPPED')) {
             this.applyUncapped();
         }
         if (flags.includes('GAMER') || flags.includes('META-SCALING')) {
@@ -270,17 +268,14 @@ class CelestialForgeTracker {
 
         const perk = this.buildPerk(data);
 
-        // If GAMER already active, activate the scaffold buildPerk already created
         if (this.state.has_gamer && perk.scaling && !perk.scaling.scaling_active) {
             perk.scaling.scaling_active = true;
         }
-        // If UNCAPPED already active, new scaling perks start uncapped
         if (this.state.has_uncapped && perk.scaling) {
             perk.scaling.maxLevel = 999;
             perk.scaling.uncapped = true;
         }
 
-        // Duplicate guard — never add the same perk name twice
         const duplicate = this.state.acquired_perks.find(p =>
             p.name.toLowerCase() === perk.name.toLowerCase()
         );
@@ -328,7 +323,6 @@ class CelestialForgeTracker {
             ? updates.flags.map(f => f.toUpperCase())
             : perk.flags;
 
-        // Detect special flag additions
         if (flags.includes('UNCAPPED') && !this.state.has_uncapped) {
             this.applyUncapped();
         }
@@ -336,20 +330,17 @@ class CelestialForgeTracker {
             this.applyGamer();
         }
 
-        // scalingActive: whether XP should accumulate — requires SCALING flag, GAMER, or explicit override
         const scalingActive = flags.includes('SCALING')
             || flags.includes('UNCAPPED')
             || this.state.has_gamer
             || perk.scaling?.scaling_active
             || !!updates.scaling?.scaling_active;
 
-        // Merge incoming updates with existing scaling so nothing is lost
         const mergedScalingData = {
             ...perk,
             scaling: {
                 ...(perk.scaling || {}),
                 ...(updates.scaling || {}),
-                // Flat level/xp overrides from the edit form
                 ...(updates.level !== undefined ? { level: parseInt(updates.level) || 1 } : {}),
                 ...(updates.xp    !== undefined ? { xp:    parseInt(updates.xp)    || 0 } : {})
             }
@@ -361,7 +352,6 @@ class CelestialForgeTracker {
             cost:               parseInt(updates.cost) || perk.cost,
             flags,
             description:        updates.description ?? perk.description,
-            // Only overwrite scaling_description if caller explicitly passed a non-null value
             scaling_description: updates.scaling_description !== undefined
                 ? (updates.scaling_description ?? perk.scaling_description)
                 : perk.scaling_description,
@@ -370,7 +360,6 @@ class CelestialForgeTracker {
             scaling:             this.makeScaling(mergedScalingData, scalingActive)
         };
 
-        // Recalc xp_needed / xp_percent after any edit
         this.recalcScalingPerk(this.state.acquired_perks[idx]);
 
         this.calcTotals();
@@ -378,7 +367,6 @@ class CelestialForgeTracker {
         this.broadcast();
         this.log(`✏️ Perk edited: ${perk.name}`);
 
-        // Sync edit back to DB if this perk has a hard link
         const editedPerk = this.state.acquired_perks[idx];
         if (editedPerk?.db_id) {
             dbUpdatePerk(editedPerk.db_id, {
@@ -397,7 +385,6 @@ class CelestialForgeTracker {
     }
 
     removePerk(perkName) {
-        // findIndex + splice — removes exactly ONE entry (first match) not all
         const idx = this.state.acquired_perks.findIndex(p =>
             p.name.toLowerCase() === perkName.toLowerCase()
         );
@@ -455,7 +442,6 @@ class CelestialForgeTracker {
             source:        perkData.source || 'roll'
         });
 
-        // Keep legacy pending_perk in sync for forge-block readers
         this.state.pending_perk = this.state.banked_perks[0]
             ? { name: this.state.banked_perks[0].name, cost: this.state.banked_perks[0].cost, cp_needed: this.state.banked_perks[0].cost - this.state.available_cp }
             : null;
@@ -482,7 +468,6 @@ class CelestialForgeTracker {
         this.state.banked_perks.splice(idx, 1);
         const result = this.addPerk(banked);
 
-        // Resync legacy pending_perk
         this.state.pending_perk = this.state.banked_perks[0]
             ? { name: this.state.banked_perks[0].name, cost: this.state.banked_perks[0].cost, cp_needed: Math.max(0, this.state.banked_perks[0].cost - this.state.available_cp) }
             : null;
@@ -510,7 +495,6 @@ class CelestialForgeTracker {
         return { success: true };
     }
 
-    // Called after any CP change — surfaces affordable banked perks as notifications
     checkBankAffordability() {
         if (!this.state.banked_perks?.length) return [];
         this.calcTotals();
@@ -521,13 +505,11 @@ class CelestialForgeTracker {
         this.state.has_uncapped = true;
         for (const p of this.state.acquired_perks) {
             if (!p.scaling) {
-                // Safe fallback — universal scaffold means this shouldn't happen
                 const active = this.state.has_gamer
                     || p.flags.includes('SCALING')
                     || p.flags.includes('UNCAPPED');
                 p.scaling = this.makeScaling({}, active);
             }
-            // Activate if GAMER is on OR perk already has SCALING/UNCAPPED flag
             const shouldActivate = this.state.has_gamer
                 || p.flags.includes('SCALING')
                 || p.flags.includes('UNCAPPED');
@@ -539,7 +521,6 @@ class CelestialForgeTracker {
         this.log('⚡ UNCAPPED active — level caps removed');
     }
 
-    // Per-perk scaling override — doesn't touch global flags
     enablePerkScaling(perkName) {
         const perk = this.state.acquired_perks.find(p =>
             p.name.toLowerCase() === perkName.toLowerCase()
@@ -549,7 +530,6 @@ class CelestialForgeTracker {
 
         perk.flags = [...new Set([...perk.flags, 'SCALING'])];
         perk.scaling = this.makeScaling({});
-        // Inherit uncapped if globally active
         if (this.state.has_uncapped) {
             perk.scaling.maxLevel = 999;
             perk.scaling.uncapped = true;
@@ -560,14 +540,12 @@ class CelestialForgeTracker {
         return { success: true };
     }
 
-    // Per-perk uncap override — adds scaling first if needed, doesn't touch global flags
     enablePerkUncapped(perkName) {
         const perk = this.state.acquired_perks.find(p =>
             p.name.toLowerCase() === perkName.toLowerCase()
         );
         if (!perk) return { success: false, reason: 'not_found' };
 
-        // Ensure it has a scaling object first
         if (!perk.scaling) {
             perk.flags = [...new Set([...perk.flags, 'SCALING'])];
             perk.scaling = this.makeScaling({});
@@ -586,14 +564,11 @@ class CelestialForgeTracker {
 
     applyGamer() {
         this.state.has_gamer = true;
-        // Every perk already has a scaffold — just activate it
         for (const p of this.state.acquired_perks) {
             if (!p.scaling) {
-                // Shouldn't happen with universal scaffold, but safe fallback
                 p.scaling = this.makeScaling({}, true);
             }
             p.scaling.scaling_active = true;
-            // If UNCAPPED is also active, uncap simultaneously
             if (this.state.has_uncapped) {
                 p.scaling.maxLevel = 999;
                 p.scaling.uncapped = true;
@@ -618,19 +593,16 @@ class CelestialForgeTracker {
         );
         if (!perk) return null;
 
-        // Ensure scaffold exists (universal, but guard anyway)
         if (!perk.scaling) {
             const active = this.state.has_gamer || perk.flags.includes('SCALING');
             perk.scaling = this.makeScaling({}, active);
         }
 
-        // Only accumulate XP if scaling is active for this perk
         if (!perk.scaling.scaling_active
             && !this.state.has_gamer
             && !perk.flags.includes('SCALING')) {
-            return null; // dormant — ignore XP until activated
+            return null;
         }
-        // Activate if GAMER just kicked in and scaffold was dormant
         if (this.state.has_gamer && !perk.scaling.scaling_active) {
             perk.scaling.scaling_active = true;
         }
@@ -638,12 +610,11 @@ class CelestialForgeTracker {
         perk.scaling.xp += amount;
         this.log(`+${amount} XP → ${perk.name} (now ${perk.scaling.xp} XP)`);
 
-        // Level up loop
         while (true) {
             const needed = perk.scaling.level * 10;
             if (perk.scaling.xp < needed) break;
             if (perk.scaling.level >= perk.scaling.maxLevel && !perk.scaling.uncapped) {
-                perk.scaling.xp = needed; // cap at max
+                perk.scaling.xp = needed;
                 break;
             }
             perk.scaling.xp -= needed;
@@ -715,26 +686,20 @@ class CelestialForgeTracker {
     syncFromForge(parsed) {
         if (!parsed) return;
 
-        // Corruption/sanity — authoritative from block only
         this.state.corruption = parsed.corruption;
         this.state.sanity     = parsed.sanity;
 
-        // Merge perks
         for (const fp of parsed.perks) {
             const existing = this.state.acquired_perks.find(p =>
                 p.name.toLowerCase() === fp.name.toLowerCase()
             );
             if (existing) {
-                // Update scaling from block if present
                 if (fp.scaling && existing.scaling) {
                     Object.assign(existing.scaling, fp.scaling);
                     this.recalcScalingPerk(existing);
                 }
                 if (fp.active !== undefined) existing.active = fp.active;
             } else {
-                // Do NOT auto-add if there is an active roll card showing for this perk.
-                // The player must explicitly Acquire/Bank/Discard from the roll UI.
-                // cfrActiveRoll is a module-level variable set when a roll card is showing.
                 const activeRollName = (typeof cfrActiveRoll !== 'undefined' && cfrActiveRoll?.perk?.name || '').toLowerCase();
                 const fpName         = (fp.name || '').toLowerCase();
                 if (activeRollName && fpName === activeRollName) {
@@ -745,7 +710,6 @@ class CelestialForgeTracker {
             }
         }
 
-        // Pending perk from block
         if (parsed.pending_perk) {
             this.state.pending_perk = {
                 name:      parsed.pending_perk,
@@ -759,19 +723,11 @@ class CelestialForgeTracker {
     }
 
     // ── NARRATIVE XP PARSING ─────────────────────────────────
-    // Matches all three lorebook-specified XP formats:
-    //   **PERK NAME** gains X XP from action!
-    //   +X XP to **PERK NAME**
-    //   **PERK NAME**: +X XP
-    // Also detects level-up lines.
 
     parseNarrativeXP(text) {
         const patterns = [
-            // **PERK NAME** gains X XP from ...
             { re: /\*\*([^*]+?)\*\*\s+gains\s+(\d+)\s+XP/gi, ni: 1, xi: 2 },
-            // +X XP to **PERK NAME**
             { re: /\+(\d+)\s+XP\s+to\s+\*\*([^*]+?)\*\*/gi, ni: 2, xi: 1 },
-            // **PERK NAME**: +X XP
             { re: /\*\*([^*]+?)\*\*:\s*\+(\d+)\s+XP/gi,      ni: 1, xi: 2 }
         ];
 
@@ -783,7 +739,6 @@ class CelestialForgeTracker {
             }
         }
 
-        // Level-up lines — **PERK** leveled up to Level X  /  PERK is now Level X
         for (const m of text.matchAll(/\*\*([^*]+?)\*\*\s+leveled\s+up\s+to\s+Level\s+(\d+)/gi)) {
             const perk = this.state.acquired_perks.find(p =>
                 p.name.toLowerCase() === m[1].trim().toLowerCase()
@@ -798,7 +753,6 @@ class CelestialForgeTracker {
     }
 
     // ── INLINE PERK DETECTION ────────────────────────────────
-    // Catches:  **PERK NAME** (100 CP) [FLAG1, FLAG2]
 
     parseInlinePerks(text) {
         for (const m of text.matchAll(/\*\*([A-Z][A-Z\s\-']+?)\*\*\s*\((\d+)\s*CP\).*?\[([^\]]*)\]/g)) {
@@ -821,7 +775,6 @@ class CelestialForgeTracker {
     processResponse(text) {
         if (!this.getSetting('enabled')) return;
 
-        // 1. Forge block (canonical state)
         if (this.getSetting('auto_parse_forge')) {
             const parsed = this.parseForgeBlock(text);
             if (parsed) {
@@ -830,13 +783,8 @@ class CelestialForgeTracker {
             }
         }
 
-        // 2. Inline perk detection
         this.parseInlinePerks(text);
-
-        // 3. Narrative XP (runs every time — GAMER or SCALING)
         this.parseNarrativeXP(text);
-
-        // 4. CP tick
         this.incrementResponse();
     }
 
@@ -922,13 +870,10 @@ ${perks || '(none)'}${this.state.pending_perk ? `\nPENDING: ${this.state.pending
                 : 'cfr_global';
             const blob = JSON.stringify(this.state);
             localStorage.setItem(key, blob);
-            // Mirror to profile-keyed key — fallback for new chats without a Gist round-trip
             localStorage.setItem(`cfr_profile_${typeof getActiveProfile === 'function' ? getActiveProfile() : 'default'}`, blob);
         } catch(e) { console.warn('[CFR] Save failed:', e); }
     }
 
-    // Profile-only save — does NOT write to chatId key
-    // Use this when loading a profile to avoid contaminating the current chat's localStorage entry
     saveProfileOnly(profileName) {
         try {
             const blob = JSON.stringify(this.state);
@@ -939,7 +884,6 @@ ${perks || '(none)'}${this.state.pending_perk ? `\nPENDING: ${this.state.pending
     load() {
         try {
             const ctx = SillyTavern.getContext();
-            // Priority: chat-specific → profile-keyed → global fallback
             let raw = ctx?.chatId
                 ? localStorage.getItem(`cfr_${ctx.chatId}`)
                 : null;
@@ -988,7 +932,7 @@ ${perks || '(none)'}${this.state.pending_perk ? `\nPENDING: ${this.state.pending
     broadcast() {
         const data = this.toSimTrackerJSON();
         window.cfrState = data;
-        window.celestialForgeState = data; // legacy compat
+        window.celestialForgeState = data;
         window.dispatchEvent(new CustomEvent('celestial-forge-update', { detail: data }));
         updateTrackerUI();
         updateHUD();
@@ -1022,11 +966,11 @@ ${perks || '(none)'}${this.state.pending_perk ? `\nPENDING: ${this.state.pending
 // ============================================================
 
 const CFR_GIST_DB_FILE    = 'cfr-perk-database.json';
-const CFR_LEGACY_STATE    = 'cfr-character-state.json'; // backward compat only
+const CFR_LEGACY_STATE    = 'cfr-character-state.json';
 
-let cfrPerkDB       = null; // in-memory perk database
-let cfrGistFileList = {};   // { filename: raw_url } populated on gistLoad
-let cfrProfileList  = [];   // ['default', 'branch-lungfight', ...] populated on gistLoad
+let cfrPerkDB       = null;
+let cfrGistFileList = {};
+let cfrProfileList  = [];
 
 // ── Profile filename helpers ──────────────────────────────────
 
@@ -1060,7 +1004,6 @@ function listProfiles(gistData) {
     const profiles = files
         .filter(f => f.startsWith('cfr-state-') && f.endsWith('.json'))
         .map(f => f.replace('cfr-state-', '').replace('.json', ''));
-    // Always include 'default' even if file doesn't exist yet
     if (!profiles.includes('default')) profiles.unshift('default');
     return profiles;
 }
@@ -1090,21 +1033,17 @@ async function gistLoad(profileNameOverride) {
         if (!res.ok) throw new Error(`Gist fetch failed: ${res.status}`);
         const data = await res.json();
 
-        // Cache file list
         cfrGistFileList = {};
         for (const [name, file] of Object.entries(data.files || {})) {
             cfrGistFileList[name] = file.raw_url;
         }
 
-        // Build profile list from filenames
         cfrProfileList = listProfiles(data);
         updateProfileUI();
 
-        // Load perk database
         if (cfrGistFileList[CFR_GIST_DB_FILE]) {
             const dbRes = await fetch(cfrGistFileList[CFR_GIST_DB_FILE]);
             cfrPerkDB   = await dbRes.json();
-            // Migrate: add custom_constellations if this is an older DB
             if (!cfrPerkDB.custom_constellations) {
                 cfrPerkDB.custom_constellations = {};
                 console.log('[CFR] Migrated DB — custom_constellations added');
@@ -1113,7 +1052,6 @@ async function gistLoad(profileNameOverride) {
             cfrPerkDB = buildEmptyDB();
         }
 
-        // Determine which profile file to load
         const targetProfile = sanitizeProfileName(profileNameOverride || getActiveProfile());
         const targetFile    = getStateFilename(targetProfile);
 
@@ -1130,7 +1068,6 @@ async function gistLoad(profileNameOverride) {
             }
         }
 
-        // Backward compat — old cfr-character-state.json as fallback for default profile
         if (!stateLoaded && targetProfile === 'default' && cfrGistFileList[CFR_LEGACY_STATE]) {
             console.log('[CFR] Migrating legacy cfr-character-state.json → cfr-state-default.json');
             const stRes  = await fetch(cfrGistFileList[CFR_LEGACY_STATE]);
@@ -1139,7 +1076,6 @@ async function gistLoad(profileNameOverride) {
                 cfrTracker.state = { ...cfrTracker.defaultState(), ...stData.state };
                 cfrTracker.calcTotals();
                 stateLoaded = true;
-                // Write migrated state under new filename
                 await gistSaveState('default');
             }
         }
@@ -1177,7 +1113,7 @@ async function gistSaveState(profileNameOverride) {
                 files: {
                     [filename]: {
                         content: JSON.stringify({
-                            version:      '1.0.0',
+                            version:      '1.0.1',
                             profile_name: profileName,
                             last_updated: new Date().toISOString(),
                             state:        cfrTracker.state
@@ -1186,12 +1122,10 @@ async function gistSaveState(profileNameOverride) {
                 }
             })
         });
-        // Keep local profile list in sync
         if (!cfrProfileList.includes(profileName)) {
             cfrProfileList.push(profileName);
             updateProfileUI();
         }
-        // Mirror to localStorage so new-chat loads have a local fallback even without Gist round-trip
         try {
             localStorage.setItem(`cfr_profile_${profileName}`, JSON.stringify(cfrTracker.state));
         } catch(_) {}
@@ -1244,14 +1178,10 @@ async function createProfile(name) {
 
 async function loadProfile(name) {
     const clean = sanitizeProfileName(name);
-    // Save current profile before switching (Gist only, don't touch chat localStorage)
     await gistSaveState(getActiveProfile());
-    // Load new profile from Gist
     await gistLoad(clean);
     setActiveProfile(clean);
 
-    // Write new state to profile localStorage key only — NOT to chatId key
-    // Writing to chatId would contaminate that chat's history with a different profile's data
     try {
         const profileKey = `cfr_profile_${clean}`;
         localStorage.setItem(profileKey, JSON.stringify(cfrTracker.state));
@@ -1277,7 +1207,6 @@ async function duplicateProfile(fromName, toName) {
 
     let stateContent;
     if (rawUrl) {
-        // Read source profile from Gist
         const res  = await fetch(rawUrl);
         const data = await res.json();
         stateContent = {
@@ -1286,9 +1215,8 @@ async function duplicateProfile(fromName, toName) {
             last_updated: new Date().toISOString()
         };
     } else {
-        // Source doesn't exist in Gist — use current in-memory state
         stateContent = {
-            version:      '1.0.0',
+            version:      '1.0.1',
             profile_name: cleanTo,
             last_updated: new Date().toISOString(),
             state:        cfrTracker?.state || {}
@@ -1317,8 +1245,6 @@ async function duplicateProfile(fromName, toName) {
     }
 }
 
-// Note: Gist files can't be truly deleted via PATCH without nulling content,
-// which leaves an empty file. We soft-delete by removing from the local list.
 function removeProfileLocal(name) {
     const clean = sanitizeProfileName(name);
     if (clean === 'default') return { success: false, reason: 'cannot_remove_default' };
@@ -1339,13 +1265,10 @@ function updateProfileUI() {
         .map(p => `<option value="${p}" ${p === current ? 'selected' : ''}>${p}</option>`)
         .join('');
 
-    // Show active profile name in HUD
     const hudProfile = document.getElementById('cfr-hud-profile');
     if (hudProfile) hudProfile.textContent = current;
 }
 
-// Returns merged { KEY: 'Label' } from base hardcoded + custom in DB
-// Everything that previously read CFR_CONSTELLATIONS directly should call this
 function getActiveConstellations() {
     const base   = { ...CFR_CONSTELLATIONS };
     const custom = cfrPerkDB?.custom_constellations || {};
@@ -1356,7 +1279,6 @@ function getActiveConstellations() {
     return merged;
 }
 
-// Returns category string for a constellation key, or '' for base ones
 function getConstellationCategory(key) {
     return cfrPerkDB?.custom_constellations?.[key]?.category || '';
 }
@@ -1369,12 +1291,11 @@ function buildEmptyDB() {
     return {
         version:             '1.0.0',
         last_updated:        '',
-        custom_constellations: {},   // user-added: { KEY: { label, category, perks[] } }
+        custom_constellations: {},
         constellations
     };
 }
 
-// Add a perk to the database for a constellation
 async function dbAddPerk(constellationKey, perkData) {
     if (!cfrPerkDB) cfrPerkDB = buildEmptyDB();
     if (!cfrPerkDB.constellations[constellationKey]) {
@@ -1444,8 +1365,6 @@ Write 350-450 words. Be specific and practical — this is a reference for futur
         if (typeof ctx.generateQuietPrompt !== 'function') {
             throw new Error('generateQuietPrompt not available — upgrade SillyTavern');
         }
-        // generateQuietPrompt(prompt, quietToLoud, skipWIAN)
-        // Uses ST's active API connection + current preset — no auth needed
         const guide = await ctx.generateQuietPrompt(prompt, false, true);
         return guide?.trim() || null;
     } catch(e) {
@@ -1454,10 +1373,8 @@ Write 350-450 words. Be specific and practical — this is a reference for futur
     }
 }
 
-// Regenerate guide for an existing constellation (button in manager list)
 window.cfrRegenerateGuide = async function(key) {
     const isBase = !!CFR_CONSTELLATIONS[key];
-    // For base constellations, build a minimal data object so the rest of the function is uniform
     const custom = isBase
         ? { label: CFR_CONSTELLATIONS[key], category: 'Core' }
         : cfrPerkDB?.custom_constellations?.[key];
@@ -1474,8 +1391,6 @@ window.cfrRegenerateGuide = async function(key) {
         : (cfrPerkDB?.custom_constellations?.[key]?.sources || '');
     const guide = await generateConstellationGuide(key, custom.label, custom.category, existingSources);
     if (guide) {
-        // ── Drop into textarea for review — do NOT write to Gist yet ──
-        // Ensure the editor panel exists in the DOM
         updateConstellationManagerList();
 
         const ta       = document.getElementById(`cfr-guide-ta-${key}`);
@@ -1484,9 +1399,7 @@ window.cfrRegenerateGuide = async function(key) {
 
         if (ta) {
             ta.value = guide;
-            // Open the editor so LO can read it immediately
             if (editorEl) editorEl.style.display = 'block';
-            // Highlight the save button so it's obvious confirmation is needed
             if (saveBtn) {
                 saveBtn.style.background    = 'rgba(241,196,15,0.25)';
                 saveBtn.style.borderColor   = '#f1c40f';
@@ -1498,7 +1411,6 @@ window.cfrRegenerateGuide = async function(key) {
                 statusEl.className   = 'cfr-status-msg ok';
             }
         } else {
-            // Textarea not in DOM for some reason — fall back to status note
             if (statusEl) {
                 statusEl.textContent = '⚠️ Could not open editor — scroll to constellation and use 📝 to review';
                 statusEl.className   = 'cfr-status-msg err';
@@ -1512,7 +1424,6 @@ window.cfrRegenerateGuide = async function(key) {
     }
 };
 
-// Save a manually-edited guide
 window.cfrSaveGuide = async function(key) {
     const ta = document.getElementById(`cfr-guide-ta-${key}`);
     if (!ta || !cfrPerkDB) return;
@@ -1525,14 +1436,12 @@ window.cfrSaveGuide = async function(key) {
     const sourcesText = sourcesEl ? sourcesEl.value.trim() : null;
 
     if (isBase) {
-        // Base constellation — write to constellations[key].theme + sources
         if (!cfrPerkDB.constellations) cfrPerkDB.constellations = {};
         if (!cfrPerkDB.constellations[key]) cfrPerkDB.constellations[key] = { domain: '', theme: '', perks: [] };
         cfrPerkDB.constellations[key].theme = guideText;
         if (sourcesText !== null) cfrPerkDB.constellations[key].sources = sourcesText;
         label = CFR_CONSTELLATIONS[key];
     } else {
-        // Custom constellation — write to custom_constellations[key].domain_guide + sources
         if (!cfrPerkDB.custom_constellations?.[key]) return;
         cfrPerkDB.custom_constellations[key].domain_guide = guideText;
         if (sourcesText !== null) cfrPerkDB.custom_constellations[key].sources = sourcesText;
@@ -1541,7 +1450,6 @@ window.cfrSaveGuide = async function(key) {
 
     await gistSaveDB();
 
-    // Reset save button back to normal style after confirmed commit
     const editorEl = document.getElementById(`cfr-guide-editor-${key}`);
     const saveBtn  = editorEl?.querySelector('button');
     if (saveBtn) {
@@ -1551,7 +1459,6 @@ window.cfrSaveGuide = async function(key) {
         saveBtn.textContent         = '💾 Save Guide';
     }
 
-    // Refresh preview snippet in the list
     updateConstellationManagerList();
 
     const statusEl = document.getElementById('cfr-const-status');
@@ -1561,7 +1468,6 @@ window.cfrSaveGuide = async function(key) {
     }
 };
 
-// Toggle guide editor visibility
 window.cfrToggleGuide = function(key) {
     const el = document.getElementById(`cfr-guide-editor-${key}`);
     if (el) el.style.display = el.style.display === 'none' ? 'block' : 'none';
@@ -1598,7 +1504,6 @@ Respond ONLY with the scaling lines, no preamble, in EXACTLY this format:
 10: [Apex mastery — peak of what this perk can achieve within defined limits]`
         + (isUncapped ? '\nUNCAPPED: [Diminishing-returns behavior past level 10 — marginal refinement, not a new tier]' : '')
         + `
-UNCAPPED: [Diminishing-returns behavior past level 10 — describe marginal refinement, not a new tier]' : ''}
 
 No headers, no explanation, no blank lines between tiers. Just the ` + (isUncapped ? 'five' : 'four') + ` lines.`;
 
@@ -1611,12 +1516,10 @@ No headers, no explanation, no blank lines between tiers. Just the ` + (isUncapp
     }
 }
 
-// Add a brand-new constellation to the DB (custom only)
 async function dbAddConstellation(label, category) {
     if (!cfrPerkDB) cfrPerkDB = buildEmptyDB();
     if (!cfrPerkDB.custom_constellations) cfrPerkDB.custom_constellations = {};
 
-    // Generate a clean ALL_CAPS key
     const key = label.trim()
         .toUpperCase()
         .replace(/[^A-Z0-9]+/g, '_')
@@ -1633,14 +1536,12 @@ async function dbAddConstellation(label, category) {
         category: category || 'Custom',
         created_at: new Date().toISOString()
     };
-    // Also seed the perks array in constellations for roll queries
     if (!cfrPerkDB.constellations) cfrPerkDB.constellations = {};
     cfrPerkDB.constellations[key] = { domain: '', theme: '', perks: [] };
 
     await gistSaveDB();
     refreshConstellationDropdowns();
 
-    // Fire guide generation in background via ST connection — always attempts, no key needed
     {
         const statusEl = document.getElementById('cfr-const-status');
         if (statusEl) {
@@ -1650,7 +1551,6 @@ async function dbAddConstellation(label, category) {
         const newSources = cfrPerkDB?.custom_constellations?.[key]?.sources || '';
         generateConstellationGuide(key, label.trim(), category || 'Custom', newSources).then(guide => {
             if (guide && cfrPerkDB?.custom_constellations?.[key]) {
-                // Refresh list first so textarea element exists in DOM
                 updateConstellationManagerList();
                 const ta       = document.getElementById(`cfr-guide-ta-${key}`);
                 const editorEl = document.getElementById(`cfr-guide-editor-${key}`);
@@ -1675,7 +1575,6 @@ async function dbAddConstellation(label, category) {
     return { success: true, key };
 }
 
-// Remove a custom constellation (cannot remove base ones)
 async function dbRemoveConstellation(key) {
     if (CFR_CONSTELLATIONS[key]) {
         return { success: false, reason: 'cannot_remove_base' };
@@ -1686,18 +1585,15 @@ async function dbRemoveConstellation(key) {
 
     const perkCount = cfrPerkDB.constellations?.[key]?.perks?.length || 0;
     delete cfrPerkDB.custom_constellations[key];
-    // Leave perk data in place — user might re-add with same key later
 
     await gistSaveDB();
     refreshConstellationDropdowns();
     return { success: true, perks_preserved: perkCount };
 }
 
-// Rebuild the constellation <select> dropdowns from current merged list
 function refreshConstellationDropdowns() {
     const active = getActiveConstellations();
 
-    // Group by category for <optgroup>
     const groups = { Core: [] };
     for (const [key, label] of Object.entries(CFR_CONSTELLATIONS)) {
         groups.Core.push({ key, label });
@@ -1720,7 +1616,6 @@ function refreshConstellationDropdowns() {
         return html;
     };
 
-    // HUD roll panel dropdown
     const rollSel = document.getElementById('cfr-roll-constellation');
     if (rollSel) {
         const cur = rollSel.value;
@@ -1728,11 +1623,9 @@ function refreshConstellationDropdowns() {
         if (cur) rollSel.value = cur;
     }
 
-    // Constellation manager list in settings drawer
     updateConstellationManagerList();
 }
 
-// Update the visual list inside the Constellation Manager tab
 function updateConstellationManagerList() {
     const el = document.getElementById('cfr-const-list');
     if (!el) return;
@@ -1740,7 +1633,6 @@ function updateConstellationManagerList() {
     const custom = cfrPerkDB?.custom_constellations || {};
     const base   = CFR_CONSTELLATIONS;
 
-    // Helper — renders one constellation card (base or custom)
     function renderCard(k, label, meta, guideText, isBase) {
         const perkCount    = cfrPerkDB?.constellations?.[k]?.perks?.length || 0;
         const hasGuide     = !!guideText;
@@ -1781,7 +1673,6 @@ function updateConstellationManagerList() {
 
     let html = '';
 
-    // ── Custom constellations (full cards with delete) ────────
     const customKeys = Object.keys(custom);
     if (customKeys.length) {
         html += `<div style="font-size:10px;color:#e94560;text-transform:uppercase;letter-spacing:1px;margin-bottom:5px;">Custom (${customKeys.length})</div>`;
@@ -1792,7 +1683,6 @@ function updateConstellationManagerList() {
         html += `<div style="font-size:10px;color:#333;font-style:italic;padding:0 0 8px;">No custom constellations yet</div>`;
     }
 
-    // ── Base constellations (collapsible, no delete) ──────────
     html += `
     <details style="margin-top:6px;">
         <summary style="font-size:10px;color:#555;text-transform:uppercase;letter-spacing:1px;cursor:pointer;list-style:none;display:flex;align-items:center;gap:6px;padding:3px 0;">
@@ -1810,7 +1700,6 @@ function updateConstellationManagerList() {
     el.innerHTML = html;
 }
 
-// Update an existing DB entry by id — called when player edits a perk manually
 async function dbUpdatePerk(dbId, updates) {
     if (!cfrPerkDB || !dbId) return { success: false, reason: 'no_db_or_id' };
 
@@ -1837,17 +1726,16 @@ async function dbUpdatePerk(dbId, updates) {
     return { success: false, reason: 'id_not_found' };
 }
 
-// Pull a random perk from a constellation
+// FIX: Returns a shallow copy — protects live DB object from downstream mutation
 function dbRollPerk(constellationKey) {
     const list = cfrPerkDB?.constellations?.[constellationKey]?.perks || [];
     if (!list.length) return null;
-    const perk = list[Math.floor(Math.random() * list.length)];
-    perk.times_rolled = (perk.times_rolled || 0) + 1;
-    gistSaveDB(); // async, fire and forget
-    return perk;
+    const idx = Math.floor(Math.random() * list.length);
+    list[idx].times_rolled = (list[idx].times_rolled || 0) + 1;
+    gistSaveDB();
+    return { ...list[idx] };
 }
 
-// Pick a random constellation key
 function dbRandomConstellation() {
     const keys = Object.keys(getActiveConstellations());
     return keys[Math.floor(Math.random() * keys.length)];
@@ -1858,9 +1746,8 @@ function dbRandomConstellation() {
 //  ROLL SYSTEM
 // ============================================================
 
-// Active roll state — what's currently pending player decision
 let cfrActiveRoll = null;
-// Persisted to sessionStorage so partial/continued responses don't lose the flag
+
 function cfrGetAwaiting() {
     return sessionStorage.getItem('cfr_awaiting_creation') === 'true';
 }
@@ -1875,15 +1762,15 @@ function cfrSetAwaiting(val, constellation) {
 function cfrGetConstellation() {
     return sessionStorage.getItem('cfr_creation_const') || null;
 }
-// Legacy in-memory flags — kept for compat but sessionStorage is authoritative
 let cfrAwaitingCreation = false;
 let cfrCreationConstellation = null;
 
+// FIX: Calls calcTotals() first so available_cp is never stale
 function buildCreationPrompt(constellationKey, tier) {
+    cfrTracker?.calcTotals();
+
     const constData = cfrPerkDB?.constellations?.[constellationKey];
     const label     = getActiveConstellations()[constellationKey] || constellationKey;
-    // Custom constellations have a domain_guide (AI-generated or manual)
-    // Base constellations can have a theme set manually in the DB
     const customEntry = cfrPerkDB?.custom_constellations?.[constellationKey];
     const theme       = customEntry?.domain_guide || constData?.theme || '';
     const sources     = customEntry?.sources      || constData?.sources || '';
@@ -1941,7 +1828,6 @@ After the perk, output an updated forge block with the perk in pending_perk (una
 [END CREATION ROLL]`;
 }
 
-// Trigger a forge roll — picks from DB
 async function triggerForgeRoll(constellationKey) {
     if (!cfrPerkDB) await gistLoad();
 
@@ -1958,21 +1844,19 @@ async function triggerForgeRoll(constellationKey) {
     showRollResult(perk, key, label, 'forge');
 }
 
-// Trigger a creation roll — injects prompt for AI generation
 async function triggerCreationRoll(constellationKey, tier) {
     if (!cfrPerkDB) await gistLoad();
 
     const key   = constellationKey || dbRandomConstellation();
     const label = getActiveConstellations()[key] || key;
-    const t     = tier || Math.ceil(Math.random() * 4) + 1; // weighted toward mid tiers
+    const t     = tier || Math.ceil(Math.random() * 4) + 1;
 
     cfrCreationConstellation = key;
     cfrAwaitingCreation      = true;
-    cfrSetAwaiting(true, key); // persist across continuations
+    cfrSetAwaiting(true, key);
 
     const prompt = buildCreationPrompt(key, t);
 
-    // Inject into ST prompt + show user what's about to be sent
     try {
         const ctx = SillyTavern.getContext();
         if (typeof ctx.setExtensionPrompt === 'function') {
@@ -1983,29 +1867,22 @@ async function triggerCreationRoll(constellationKey, tier) {
     showCreationPending(key, label, t);
 }
 
-// After a creation roll — AI has responded, parse the new perk
 async function finalizeCreationRoll(text) {
-    // Check both memory and sessionStorage — handles continued responses
     const isAwaiting = cfrAwaitingCreation || cfrGetAwaiting();
     if (!isAwaiting) return;
 
-    // Restore constellation from sessionStorage if memory flag was lost
     if (!cfrCreationConstellation) {
         cfrCreationConstellation = cfrGetConstellation();
     }
 
     let perk = null;
 
-    // ── Strategy 1: Correct format  **Name** (X CP) [FLAGS]
-    // Anchored to start of line to avoid matching mid-sentence bold text
-    const matchDirect = text.match(/^\*\*([^*:\n]+?)\*\*\s*\((\d+)\s*CP\)\s*\[([^\]]*)\]/m);
+    const matchDirect = text.match(/^\*\*\[?([^*:\n\[\]]+?)\]?\*\*\s*\((\d+)\s*CP\)\s*\[([^\]]*)\]/m);
     if (matchDirect) {
         perk = parsePerkFromMatch(matchDirect, text);
         console.log('[CFR] Parsed perk via Strategy 1 (direct format)');
     }
 
-    // ── Strategy 2: Labeled format  **PERK NAME:** Name (X CP) [FLAGS]
-    // AI sometimes treats the format spec as literal field labels
     if (!perk) {
         const matchLabeled = text.match(/\*\*PERK\s*NAME[:\s]*\*\*\s*([^(\n]+?)\s*\((\d+)\s*CP\)\s*\[([^\]]*)\]/i);
         if (matchLabeled) {
@@ -2021,8 +1898,6 @@ async function finalizeCreationRoll(text) {
         }
     }
 
-    // ── Strategy 3: Forge block fallback
-    // AI wrote a valid forge block — extract pending_perk from it
     if (!perk) {
         const forgeMatch = text.match(/```forge\s*([\s\S]*?)```/);
         if (forgeMatch) {
@@ -2046,13 +1921,11 @@ async function finalizeCreationRoll(text) {
     }
 
     if (!perk) {
-        // Don't clear the flag — leave awaiting active so a continuation can still be caught
         console.warn('[CFR] Creation roll: all parse strategies failed — keeping await flag for continuation.');
         showRollToast('Perk not parsed yet — if AI is still generating, it will be caught on continuation', false);
         return;
     }
 
-    // Only clear flags after successful parse
     cfrAwaitingCreation = false;
     cfrSetAwaiting(false);
     try {
@@ -2069,13 +1942,7 @@ async function finalizeCreationRoll(text) {
         constellationLabel: getActiveConstellations()[cfrCreationConstellation] || cfrCreationConstellation
     };
 
-    // Open HUD if closed so player sees the result card
-    const hud = document.getElementById('cfr-hud');
-    const btn = document.getElementById('cfr-hud-btn');
-    if (hud && hud.classList.contains('hidden')) {
-        hud.classList.remove('hidden');
-        if (btn) btn.classList.add('open');
-    }
+    setHUDVisible(true);
 
     showRollResult(perk, cfrActiveRoll.constellationKey, cfrActiveRoll.constellationLabel, 'creation');
 }
@@ -2083,8 +1950,6 @@ async function finalizeCreationRoll(text) {
 // ── Parse helpers ─────────────────────────────────────────────
 
 function parsePerkFromMatch(match, fullText) {
-    const afterHeader = fullText.slice(fullText.indexOf(match[0]) + match[0].length).trim();
-    // Strip surrounding square brackets AI sometimes adds: **[Name]** -> Name
     const rawName = match[1].trim();
     const cleanName = rawName.replace(/^\[|\]$/g, '').trim();
     return {
@@ -2100,7 +1965,6 @@ function parsePerkFromMatch(match, fullText) {
 function extractDescription(text, headerStr) {
     const afterHeader = text.slice(text.indexOf(headerStr) + headerStr.length).trim();
     const withoutForge = afterHeader.replace(/```forge[\s\S]*?```/g, '').trim();
-    // Stop before SCALING: section
     const scalingIdx = withoutForge.search(/^SCALING:/m);
     const descText   = scalingIdx > -1 ? withoutForge.slice(0, scalingIdx).trim() : withoutForge;
     const paragraphs = descText.split(/\n\n+/).filter(p => p.trim().length > 20).slice(0, 3);
@@ -2108,7 +1972,6 @@ function extractDescription(text, headerStr) {
 }
 
 function extractDescriptionFromText(text, perkName) {
-    // Find description near the perk name mention
     const nameIdx = text.toLowerCase().indexOf(perkName.toLowerCase());
     if (nameIdx === -1) return '';
     const after    = text.slice(nameIdx + perkName.length);
@@ -2117,26 +1980,32 @@ function extractDescriptionFromText(text, perkName) {
     return paragraphs.join('\n\n').trim();
 }
 
-// Serialize a scaling_description object back to the editable text format
+// FIX: Sorts tier keys numerically so output is always 1-3, 4-6, 7-9, 10, UNCAPPED
 function scalingDescToText(sd) {
     if (!sd || typeof sd !== 'object') return '';
     const lines = [];
-    for (const [key, val] of Object.entries(sd)) {
-        if (key !== 'uncapped') lines.push(`${key}: ${val}`);
+    const sorted = Object.entries(sd)
+        .filter(([key]) => key !== 'uncapped')
+        .sort(([a], [b]) => {
+            const aNum = parseInt(a.split('-')[0]) || 0;
+            const bNum = parseInt(b.split('-')[0]) || 0;
+            return aNum - bNum;
+        });
+    for (const [key, val] of sorted) {
+        lines.push(`${key}: ${val}`);
     }
     if (sd['uncapped']) lines.push(`UNCAPPED: ${sd['uncapped']}`);
     return lines.join('\n');
 }
 
+// FIX: Changed \n\n\n to \n\n+ — standard AI output uses two newlines between sections
 function extractScalingDescription(text) {
-    // Match both plain "SCALING:" and bold "**SCALING:**" formats
-    const scalingMatch = text.match(/\*{0,2}SCALING:\*{0,2}\s*\n([\s\S]*?)(?=\n\n\n|```forge|\[END|$)/);
+    const scalingMatch = text.match(/\*{0,2}SCALING:\*{0,2}\s*\n([\s\S]*?)(?=\n\n+|```forge|\[END|$)/);
     if (!scalingMatch) return null;
 
     const lines  = scalingMatch[1].split('\n').filter(l => l.trim());
     const result = {};
     for (const line of lines) {
-        // Match tier ranges: **1-3:** text  OR  1-3: text  OR  **10:** text
         const m = line.match(/^\*{0,2}(\d+(?:-\d+)?):\*{0,2}\s*(.+)/);
         if (m) {
             const key = m[1].trim();
@@ -2145,7 +2014,6 @@ function extractScalingDescription(text) {
         }
     }
 
-    // Also capture dedicated UNCAPPED: line if present anywhere in text
     const uncappedMatch = text.match(/^\*{0,2}UNCAPPED:\*{0,2}\s*(.+)/m);
     if (uncappedMatch) {
         result['uncapped'] = uncappedMatch[1].replace(/^\*+|\*+$/g, '').trim();
@@ -2154,21 +2022,17 @@ function extractScalingDescription(text) {
     return Object.keys(result).length ? result : null;
 }
 
-// Player clicks Acquire
 async function rollAcquire() {
     if (!cfrActiveRoll) return;
     const { perk, constellationKey, type } = cfrActiveRoll;
 
-    // Add to DB first so we get the id to link back to character sheet
     const dbResult = await dbAddPerk(constellationKey, { ...perk, source: type });
-    // If it was a duplicate, reuse the existing entry's id
     const dbId = dbResult.id || dbResult.existing?.id || null;
     const perkWithId = { ...perk, db_id: dbId };
 
     const result = cfrTracker.addPerk(perkWithId);
 
     if (!result.success && result.reason === 'already_acquired') {
-        // syncFromForge already added it — just confirm to the player
         showRollToast(`✅ ${perk.name} already on sheet — DB updated`);
         cfrActiveRoll = null;
         hideRollCard();
@@ -2177,7 +2041,6 @@ async function rollAcquire() {
     }
 
     if (!result.success && result.reason === 'insufficient_cp') {
-        // Auto-bank since they tried to acquire but can't afford
         cfrTracker.bankPerk(perkWithId, constellationKey);
         showRollToast(`💡 Can't afford yet — ${perk.name} banked automatically`);
     } else {
@@ -2189,12 +2052,10 @@ async function rollAcquire() {
     checkAndNotifyBank();
 }
 
-// Player clicks Bank
 async function rollBank() {
     if (!cfrActiveRoll) return;
     const { perk, constellationKey, type } = cfrActiveRoll;
 
-    // Add to DB on bank too — capture id for future acquire linkage
     const dbResult = await dbAddPerk(constellationKey, { ...perk, source: type });
     const dbId     = dbResult.id || dbResult.existing?.id || null;
     const perkWithId = { ...perk, db_id: dbId };
@@ -2210,23 +2071,18 @@ async function rollBank() {
     hideRollCard();
 }
 
-// Player clicks Discard
 function rollDiscard() {
     if (!cfrActiveRoll) return;
     const name = cfrActiveRoll.perk?.name || 'perk';
     cfrActiveRoll = null;
     hideRollCard();
     showRollToast(`❌ ${name} discarded — no CP spent`);
-    // Do NOT add to DB on discard
 }
 
-// Check if any banked perks are now affordable after CP change
 function checkAndNotifyBank() {
     if (!cfrTracker) return;
     const affordable = cfrTracker.checkBankAffordability();
     if (!affordable.length) return;
-
-    // Show notification for first affordable banked perk
     const p = affordable[0];
     showBankNotification(p);
 }
@@ -2237,9 +2093,6 @@ function checkAndNotifyBank() {
 // ============================================================
 
 function getRollPanelHTML() {
-    // Use getActiveConstellations() so custom entries appear if DB is already loaded
-    // If called before gistLoad, falls back to base-only — refreshConstellationDropdowns
-    // will update the live element after Gist resolves anyway
     const active = getActiveConstellations();
     const constellationOptions = Object.entries(active)
         .map(([k, v]) => `<option value="${k}">${v}</option>`)
@@ -2424,7 +2277,6 @@ function updateBankedList() {
     }).join('');
 }
 
-// Manual scan — re-runs full pipeline on the last AI message in ctx.chat
 async function scanLastMessage() {
     const ctx = SillyTavern.getContext();
     if (!ctx?.chat?.length) {
@@ -2432,7 +2284,6 @@ async function scanLastMessage() {
         return;
     }
 
-    // Find last AI message (walk back from end)
     let targetIdx = -1;
     for (let i = ctx.chat.length - 1; i >= 0; i--) {
         if (!ctx.chat[i].is_user) { targetIdx = i; break; }
@@ -2452,7 +2303,6 @@ async function scanLastMessage() {
     showRollToast('🔍 Scanning last message…');
     console.log('[CFR] Manual scan — message idx', targetIdx, 'length', raw.length);
 
-    // Run perk detection regardless of awaiting flag
     const isAwaiting = cfrAwaitingCreation || cfrGetAwaiting();
     if (isAwaiting) {
         await finalizeCreationRoll(raw);
@@ -2460,8 +2310,7 @@ async function scanLastMessage() {
         passivePerkScan(raw);
     }
 
-    // Also run full response processing (XP, forge block sync, etc.)
-    cfrLastMsgIdx = targetIdx; // update dedup so auto-events don't double-fire
+    cfrLastMsgIdx = targetIdx;
     cfrTracker.processResponse(raw);
 
     updateTrackerUI();
@@ -2469,7 +2318,9 @@ async function scanLastMessage() {
     updatePromptInjection();
 }
 
-// Manual forge-block-only apply — reads the forge JSON and syncs state from it
+// FIX: Now correctly parses the forge block before passing to syncFromForge.
+// The original code passed raw string directly to syncFromForge which expected
+// a parsed object, silently crashing with a TypeError on parsed.perks iteration.
 function applyLastForgeBlock() {
     const ctx = SillyTavern.getContext();
     if (!ctx?.chat?.length) {
@@ -2477,7 +2328,6 @@ function applyLastForgeBlock() {
         return;
     }
 
-    // Find last AI message with a forge block
     let raw = null;
     for (let i = ctx.chat.length - 1; i >= 0; i--) {
         if (!ctx.chat[i].is_user && ctx.chat[i].mes?.includes('```forge')) {
@@ -2491,19 +2341,57 @@ function applyLastForgeBlock() {
         return;
     }
 
-    const synced = cfrTracker.syncFromForge(raw);
-    if (synced) {
-        updateTrackerUI();
-        updateHUD();
-        updatePromptInjection();
-        showRollToast('✅ Forge block applied — state updated');
-    } else {
-        showRollToast('⚠️ Forge block found but sync failed — check format', true);
+    const parsed = cfrTracker.parseForgeBlock(raw);
+    if (!parsed) {
+        showRollToast('⚠️ Forge block found but could not parse JSON — check AI output format', true);
+        return;
     }
+
+    cfrTracker.syncFromForge(parsed);
+    updateTrackerUI();
+    updateHUD();
+    updatePromptInjection();
+    showRollToast('✅ Forge block applied — state updated');
 }
 
 window.scanLastMessage    = scanLastMessage;
 window.applyLastForgeBlock = applyLastForgeBlock;
+
+// FIX: Uses matchAll to iterate all perk headers; surfaces first unacquired perk.
+// Original only caught the first match in the entire text regardless of acquisition status.
+function passivePerkScan(text) {
+    const re = /^\*\*\[?([^*:\n\[\]]+?)\]?\*\*\s*\((\d+)\s*CP\)\s*\[([^\]]*)\]/gm;
+    for (const match of text.matchAll(re)) {
+        const name  = match[1].trim();
+        const cost  = parseInt(match[2]);
+        const flags = match[3].split(/[,\s]+/).map(f => f.trim()).filter(Boolean);
+
+        const already = cfrTracker?.state?.acquired_perks?.some(p =>
+            p.name.toLowerCase() === name.toLowerCase()
+        );
+        if (already) continue;
+
+        console.log('[CFR] Passive scan found perk:', name, cost, flags);
+
+        const perk = {
+            name, cost, flags,
+            description: extractDescriptionFromText(text, name),
+            scaling_description: extractScalingDescription(text),
+            source: 'detected'
+        };
+        cfrActiveRoll = {
+            type: 'creation',
+            perk,
+            constellationKey:   cfrCreationConstellation || '',
+            constellationLabel: getActiveConstellations()[cfrCreationConstellation] || 'Unknown Constellation'
+        };
+
+        setHUDVisible(true);
+        showRollResult(perk, cfrActiveRoll.constellationKey, cfrActiveRoll.constellationLabel, 'creation');
+        showRollToast('Perk detected in response — choose Acquire, Bank, or Discard');
+        return; // surface one at a time — player resolves each before next fires
+    }
+}
 
 function bindRollButtons() {
     $('#cfr-btn-forge-roll').on('click', () => {
@@ -2522,7 +2410,6 @@ function bindRollButtons() {
     $('#cfr-btn-stamp-forge').on('click', () => stampForgeBlock());
     $('#cfr-btn-force-sync').on('click', () => forceSyncPrompt());
 
-    // Global modifier buttons
     $('#cfr-btn-apply-gamer').on('click', () => {
         if (!cfrTracker) return;
         if (cfrTracker.state.has_gamer) {
@@ -2555,7 +2442,6 @@ function bindRollButtons() {
         showStatus('cfr-global-mod-status', '✅ UNCAPPED activated — all scaling perks unlimited', 'ok');
     });
 
-    // Constellation manager buttons
     $('#cfr-btn-const-add').on('click', async () => {
         const name = $('#cfr-const-name-input').val().trim();
         const cat  = $('#cfr-const-cat-select').val();
@@ -2575,7 +2461,6 @@ function bindRollButtons() {
         }
     });
 
-    // Profile management buttons
     $('#cfr-btn-profile-load').on('click', async () => {
         const sel = $('#cfr-profile-select').val();
         if (!sel) return;
@@ -2642,23 +2527,14 @@ function bindRollButtons() {
     });
 }
 
-// Expose roll functions globally so inline onclick handlers work
 window.rollAcquire = rollAcquire;
 window.rollBank    = rollBank;
 window.rollDiscard = rollDiscard;
 
 
 // ============================================================
-//  PROMPT INJECTION — pushes live state into every outgoing prompt
+//  PROMPT INJECTION
 // ============================================================
-
-// ST extension prompt positions:
-//   0 = Before Main Prompt (system top)
-//   1 = After Main Prompt
-//   2 = Before World Info / After AN
-// Depth: number of messages from bottom (0 = always injected at position)
-// We use position 1, depth 0 — sits in the system block, always present,
-// updated every time tracker state changes.
 
 const CFR_PROMPT_KEY = 'celestial-forge-reformed-state';
 
@@ -2667,7 +2543,6 @@ function updatePromptInjection() {
     try {
         const ctx = SillyTavern.getContext();
         if (typeof ctx.setExtensionPrompt !== 'function') {
-            // Fallback: older ST builds may not have this — warn once
             if (!window._cfrPromptWarnShown) {
                 console.warn('[CFR] setExtensionPrompt not available — upgrade SillyTavern for prompt injection.');
                 window._cfrPromptWarnShown = true;
@@ -2676,13 +2551,11 @@ function updatePromptInjection() {
         }
 
         if (!cfrSettings?.enabled) {
-            // Clear injection when disabled
             ctx.setExtensionPrompt(CFR_PROMPT_KEY, '', 0, 0);
             return;
         }
 
         const block = buildPromptBlock();
-        // Position 1 = after main prompt, depth 0 = no in-chat depth offset
         ctx.setExtensionPrompt(CFR_PROMPT_KEY, block, 0, 0);
 
         if (cfrSettings?.debug_mode) {
@@ -2693,19 +2566,13 @@ function updatePromptInjection() {
     }
 }
 
-// Builds the injected text block — concise but complete.
-// The lorebook already explains flag meanings and XP rules,
-// so this block is pure current state, no definitions needed.
-// Returns the appropriate scaling description text for a perk at its current level
 function getCurrentScalingDesc(perk) {
     const sd = perk.scaling_description;
     if (!sd || typeof sd !== 'object') return null;
     const level = perk.scaling?.level || 1;
 
-    // Check exact level match first (e.g. "10")
     if (sd[String(level)]) return sd[String(level)];
 
-    // Check range keys like "1-3", "4-6", "7-9"
     for (const [key, val] of Object.entries(sd)) {
         const rangeMatch = key.match(/^(\d+)-(\d+)$/);
         if (rangeMatch) {
@@ -2715,7 +2582,6 @@ function getCurrentScalingDesc(perk) {
         }
     }
 
-    // Past all defined tiers — check for dedicated uncapped key first
     if (sd['uncapped']) {
         if (perk.scaling?.uncapped && level > 10) {
             const levelsOver = level - 10;
@@ -2723,7 +2589,6 @@ function getCurrentScalingDesc(perk) {
         }
     }
 
-    // Fallback: use highest defined tier + level context
     const keys = Object.keys(sd)
         .filter(k => k !== 'uncapped')
         .sort((a, b) => {
@@ -2773,7 +2638,6 @@ function buildPromptBlock() {
                 entry += p.active ? ' [ACTIVE]' : ' [INACTIVE — toggled off]';
             }
 
-            // Use current-level scaling description if available, otherwise base description
             const currentDesc = getCurrentScalingDesc(p);
             if (currentDesc) {
                 entry += `\n    Current effect: ${currentDesc}`;
@@ -2781,7 +2645,6 @@ function buildPromptBlock() {
                 entry += `\n    Effect: ${p.description}`;
             }
 
-            // Surface uncapped philosophy so AI understands beyond-apex behavior
             if (p.scaling?.uncapped && p.scaling?.level > 10 && p.scaling_description?.uncapped) {
                 entry += `\n    Beyond-apex behavior: ${p.scaling_description.uncapped}`;
             }
@@ -2796,8 +2659,6 @@ function buildPromptBlock() {
 
     lines.push('[END FORGE STATE]');
 
-    // ── MANDATORY OUTPUT INSTRUCTION ─────────────────────────
-    // Appended every time so the AI always knows to include a forge block
     lines.push('');
     lines.push('MANDATORY: End EVERY response with an updated forge block in this exact format:');
     lines.push('```forge');
@@ -2847,7 +2708,7 @@ function getCFRSettingsHtml() {
 <div id="cfr-settings-panel" class="cfr-panel">
   <div class="inline-drawer">
     <div class="inline-drawer-toggle inline-drawer-header">
-      <b>⚒️ Celestial Forge Reformed v1.0</b>
+      <b>⚒️ Celestial Forge Reformed v1.0.1</b>
       <div class="inline-drawer-icon fa-solid fa-circle-chevron-down down"></div>
     </div>
     <div class="inline-drawer-content">
@@ -3008,7 +2869,6 @@ UNCAPPED: Marginal refinement per level..." style="width:100%;height:90px;backgr
             <div class="cfr-btn-row" style="margin-top:8px;">
               <input type="button" class="menu_button" id="cfr-btn-save-edit" value="💾 Save Changes" />
             </div>
-            <!-- Option 5: post-save generate prompt -->
             <div id="cfr-post-save-gen-prompt" style="display:none;margin-top:6px;padding:6px 8px;background:rgba(241,196,15,0.07);border:1px solid #f1c40f44;border-radius:4px;">
               <div style="font-size:10px;color:#f1c40f;margin-bottom:5px;">This perk has no level descriptors. Generate them now?</div>
               <div style="display:flex;gap:5px;">
@@ -3097,6 +2957,9 @@ UNCAPPED: Marginal refinement per level..." style="width:100%;height:90px;backgr
       </div>
 
       <!-- GLOBAL MODIFIERS -->
+      <!-- FIX: Removed "active" from static label text — it was always displaying
+           as "UNCAPPED active" / "GAMER active" regardless of actual state.
+           The dynamic status span beside it now carries the active/inactive text. -->
       <div class="cfr-manual-section">
         <div class="cfr-manual-title">⚡ Global Modifiers</div>
         <div class="cfr-settings-section">
@@ -3106,14 +2969,14 @@ UNCAPPED: Marginal refinement per level..." style="width:100%;height:90px;backgr
           </div>
           <div id="cfr-global-mod-status" style="font-size:11px;margin-bottom:6px;"></div>
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
-            <span style="font-size:12px;color:#ccc;">🎮 GAMER active</span>
+            <span style="font-size:12px;color:#ccc;">🎮 GAMER</span>
             <span id="cfr-gamer-status" style="font-size:11px;color:#555;">inactive</span>
           </div>
           <div class="cfr-btn-row" style="margin-bottom:8px;">
             <input type="button" class="menu_button" id="cfr-btn-apply-gamer" value="Activate GAMER" />
           </div>
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
-            <span style="font-size:12px;color:#ccc;">⚡ UNCAPPED active</span>
+            <span style="font-size:12px;color:#ccc;">⚡ UNCAPPED</span>
             <span id="cfr-uncapped-status" style="font-size:11px;color:#555;">inactive</span>
           </div>
           <div class="cfr-btn-row">
@@ -3235,7 +3098,6 @@ function updateTrackerUI() {
         pending.hide();
     }
 
-    // Perk list
     const list = $('#cfr-perk-list');
     if (!s.acquired_perks.length) {
         list.html('<small>No perks yet</small>');
@@ -3294,13 +3156,11 @@ function updateTrackerUI() {
         </div>`;
     }).join(''));
 
-    // Toggle clicks
     $('.cfr-perk-toggle').off('click').on('click', function(e) {
         e.stopPropagation();
         cfrTracker.togglePerk($(this).data('perk'));
     });
 
-    // Populate dropdowns for manual controls
     populatePerkDropdowns();
     updateGlobalModStatus();
 }
@@ -3314,52 +3174,114 @@ function injectHUD() {
     $('#cfr-hud').remove();
     $('#cfr-hud-btn').remove();
 
-    $('body').append(`
-        <div id="cfr-hud-btn" title="Drag to move · Click to toggle">⚒️</div>
-        <div id="cfr-hud" class="hidden">
-          <div class="cfr-hud-header">
-            <p class="cfr-hud-title">Celestial Forge</p>
-            <div class="cfr-hud-sub" id="cfr-hud-sync">waiting…</div>
-            <div class="cfr-hud-sub" id="cfr-hud-profile" style="color:#f1c40f;font-size:9px;margin-top:1px;">profile: default</div>
-          </div>
-          <div class="cfr-hud-cp">
-            <div class="cfr-hud-cp-box">
-              <div class="cfr-hud-cp-label">Available CP</div>
-              <div class="cfr-hud-cp-val" id="cfr-hud-avail">0</div>
-            </div>
-            <div class="cfr-hud-cp-box">
-              <div class="cfr-hud-cp-label">Total CP</div>
-              <div class="cfr-hud-cp-val" id="cfr-hud-total">0</div>
-            </div>
-            <div class="cfr-hud-cp-box">
-              <div class="cfr-hud-cp-label">Spent</div>
-              <div class="cfr-hud-cp-val" id="cfr-hud-spent">0</div>
-            </div>
-          </div>
-          <div class="cfr-hud-meters">
-            <div class="cfr-hud-meter-row">
-              <div class="cfr-hud-meter-label" style="color:#9b59b6">CORRUPTION</div>
-              <div class="cfr-hud-meter-track">
-                <div class="cfr-hud-meter-fill" id="cfr-hud-corr-fill" style="background:#9b59b6;width:0%"></div>
-              </div>
-              <div class="cfr-hud-meter-val" id="cfr-hud-corr-val">0%</div>
-            </div>
-            <div class="cfr-hud-meter-row">
-              <div class="cfr-hud-meter-label" style="color:#3498db">SANITY</div>
-              <div class="cfr-hud-meter-track">
-                <div class="cfr-hud-meter-fill" id="cfr-hud-san-fill" style="background:#3498db;width:0%"></div>
-              </div>
-              <div class="cfr-hud-meter-val" id="cfr-hud-san-val">0%</div>
-            </div>
-          </div>
-          <div id="cfr-hud-pending"></div>
-          <div class="cfr-hud-perks">
-            <div class="cfr-hud-perks-title">Acquired Perks (<span id="cfr-hud-perk-count">0</span>)</div>
-            <div id="cfr-hud-perk-list"><small style="color:#555;">No perks yet.</small></div>
-          </div>
-          ${getRollPanelHTML()}
+    // ── Detect mobile once ─────────────────────────────────────────────────
+    const isMobile = window.innerWidth <= 768 || /Mobi|Android/i.test(navigator.userAgent);
+
+    // ── BUTTON ─────────────────────────────────────────────────────────────
+    // Build via DOM API and apply ALL positioning/appearance styles inline.
+    // Do NOT rely on style.css loading — on mobile, extension CSS can silently
+    // fail (cache miss, path mismatch, CSP), leaving a 0×0 invisible div.
+    // Inline styles win even if the stylesheet never loads.
+    const btn = document.createElement('div');
+    btn.id        = 'cfr-hud-btn';
+    btn.title     = 'Tap to open Celestial Forge';
+    btn.innerHTML = '⚒️';
+    Object.assign(btn.style, {
+        position:                'fixed',
+        bottom:                  isMobile ? '120px' : '80px',
+        right:                   isMobile ? '14px'  : '20px',
+        width:                   isMobile ? '48px'  : '42px',
+        height:                  isMobile ? '48px'  : '42px',
+        borderRadius:            '50%',
+        background:              'radial-gradient(circle at 35% 35%, #2a1a2e, #0d0d1a)',
+        border:                  '2px solid #e94560',
+        boxShadow:               '0 0 14px rgba(233,69,96,0.45), 0 2px 8px rgba(0,0,0,0.7)',
+        display:                 'flex',
+        alignItems:              'center',
+        justifyContent:          'center',
+        fontSize:                isMobile ? '20px' : '18px',
+        cursor:                  'pointer',
+        zIndex:                  '2147483647',       // INT_MAX — beats every ST layer
+        userSelect:              'none',
+        webkitUserSelect:        'none',
+        touchAction:             'manipulation',     // NOT 'none' — 'none' swallows taps on Android
+        webkitTapHighlightColor: 'transparent',
+        transform:               'translateZ(0)',    // own GPU layer / stacking context
+        webkitTransform:         'translateZ(0)'
+    });
+    document.body.appendChild(btn);
+
+    // ── PANEL ──────────────────────────────────────────────────────────────
+    const panel = document.createElement('div');
+    panel.id        = 'cfr-hud';
+    panel.className = 'hidden';
+    Object.assign(panel.style, {
+        position:        'fixed',
+        bottom:          isMobile ? '180px' : '132px',
+        right:           isMobile ? '8px'   : '16px',
+        left:            isMobile ? '8px'   : 'auto',
+        width:           isMobile ? 'auto'  : '300px',
+        maxHeight:       '80vh',
+        background:      'linear-gradient(160deg,#0d0d1a 0%,#0a0a14 100%)',
+        border:          '1px solid #1a1a2e',
+        borderRadius:    '10px',
+        boxShadow:       '0 8px 32px rgba(0,0,0,0.7)',
+        zIndex:          '2147483646',
+        display:         'flex',
+        flexDirection:   'column',
+        overflow:        'hidden',
+        transition:      'opacity 0.15s, transform 0.15s',
+        fontFamily:      "'Segoe UI',system-ui,sans-serif",
+        // Start hidden — toggled by btn click via updateHUDVisibility()
+        opacity:         '0',
+        pointerEvents:   'none',
+        transform:       'translateY(8px) scale(0.97) translateZ(0)',
+        webkitTransform: 'translateY(8px) scale(0.97) translateZ(0)'
+    });
+    panel.innerHTML = `
+        <div class="cfr-hud-header">
+          <p class="cfr-hud-title">Celestial Forge</p>
+          <div class="cfr-hud-sub" id="cfr-hud-sync">waiting…</div>
+          <div class="cfr-hud-sub" id="cfr-hud-profile" style="color:#f1c40f;font-size:9px;margin-top:1px;">profile: default</div>
         </div>
-    `);
+        <div class="cfr-hud-cp">
+          <div class="cfr-hud-cp-box">
+            <div class="cfr-hud-cp-label">Available CP</div>
+            <div class="cfr-hud-cp-val" id="cfr-hud-avail">0</div>
+          </div>
+          <div class="cfr-hud-cp-box">
+            <div class="cfr-hud-cp-label">Total CP</div>
+            <div class="cfr-hud-cp-val" id="cfr-hud-total">0</div>
+          </div>
+          <div class="cfr-hud-cp-box">
+            <div class="cfr-hud-cp-label">Spent</div>
+            <div class="cfr-hud-cp-val" id="cfr-hud-spent">0</div>
+          </div>
+        </div>
+        <div class="cfr-hud-meters">
+          <div class="cfr-hud-meter-row">
+            <div class="cfr-hud-meter-label" style="color:#9b59b6">CORRUPTION</div>
+            <div class="cfr-hud-meter-track">
+              <div class="cfr-hud-meter-fill" id="cfr-hud-corr-fill" style="background:#9b59b6;width:0%"></div>
+            </div>
+            <div class="cfr-hud-meter-val" id="cfr-hud-corr-val">0%</div>
+          </div>
+          <div class="cfr-hud-meter-row">
+            <div class="cfr-hud-meter-label" style="color:#3498db">SANITY</div>
+            <div class="cfr-hud-meter-track">
+              <div class="cfr-hud-meter-fill" id="cfr-hud-san-fill" style="background:#3498db;width:0%"></div>
+            </div>
+            <div class="cfr-hud-meter-val" id="cfr-hud-san-val">0%</div>
+          </div>
+        </div>
+        <div id="cfr-hud-pending"></div>
+        <div class="cfr-hud-perks">
+          <div class="cfr-hud-perks-title">Acquired Perks (<span id="cfr-hud-perk-count">0</span>)</div>
+          <div id="cfr-hud-perk-list"><small style="color:#555;">No perks yet.</small></div>
+        </div>
+        ${getRollPanelHTML()}
+    `;
+    document.body.appendChild(panel);
 
     bindHUDDrag();
 }
@@ -3407,9 +3329,42 @@ function bindHUDDrag() {
     btn.addEventListener('click', () => {
         if (moved) return;
         const hud = document.getElementById('cfr-hud');
-        hud.classList.toggle('hidden');
-        btn.classList.toggle('open', !hud.classList.contains('hidden'));
+        if (!hud) return;
+        setHUDVisible(hud.dataset.cfrOpen !== '1');
     });
+}
+
+// ── Inline-style-driven show/hide — does NOT depend on style.css loading ──
+function setHUDVisible(open) {
+    const hud = document.getElementById('cfr-hud');
+    const btn = document.getElementById('cfr-hud-btn');
+    if (!hud) return;
+
+    hud.dataset.cfrOpen = open ? '1' : '0';
+
+    if (open) {
+        hud.classList.remove('hidden');
+        hud.style.opacity         = '1';
+        hud.style.pointerEvents   = 'auto';
+        hud.style.transform       = 'translateY(0) scale(1) translateZ(0)';
+        hud.style.webkitTransform = 'translateY(0) scale(1) translateZ(0)';
+        if (btn) {
+            btn.classList.add('open');
+            btn.style.borderColor = '#ffd700';
+            btn.style.boxShadow   = '0 0 18px rgba(255,215,0,0.35), 0 2px 8px rgba(0,0,0,0.7)';
+        }
+    } else {
+        hud.classList.add('hidden');
+        hud.style.opacity         = '0';
+        hud.style.pointerEvents   = 'none';
+        hud.style.transform       = 'translateY(8px) scale(0.97) translateZ(0)';
+        hud.style.webkitTransform = 'translateY(8px) scale(0.97) translateZ(0)';
+        if (btn) {
+            btn.classList.remove('open');
+            btn.style.borderColor = '#e94560';
+            btn.style.boxShadow   = '0 0 14px rgba(233,69,96,0.45), 0 2px 8px rgba(0,0,0,0.7)';
+        }
+    }
 }
 
 function updateHUD() {
@@ -3566,7 +3521,6 @@ function buildDetailsHTML() {
 </details>`;
 }
 
-// Inject a details block at the end of a specific AI message element
 function injectDetailsIntoMessage(mesEl) {
     if (!cfrTracker?.getSetting('inject_details')) return;
     if (!mesEl) return;
@@ -3582,14 +3536,12 @@ function injectDetailsIntoMessage(mesEl) {
     }
 }
 
-// Refresh the details block on the last AI message
 function refreshLastDetail() {
     const msgs = document.querySelectorAll('#chat .mes:not(.is_user)');
     if (!msgs.length) return;
     injectDetailsIntoMessage(msgs[msgs.length - 1]);
 }
 
-// Refresh all existing injected blocks (after manual edits)
 function refreshAllDetails() {
     if (!cfrTracker?.getSetting('inject_details')) return;
     document.querySelectorAll('#chat .mes:not(.is_user)').forEach(el => {
@@ -3597,7 +3549,6 @@ function refreshAllDetails() {
             injectDetailsIntoMessage(el);
         }
     });
-    // Also inject into last message if not already there
     refreshLastDetail();
 }
 
@@ -3608,21 +3559,17 @@ function refreshAllDetails() {
 
 function hideForgeBlocks() {
     if (!cfrTracker?.getSetting('hide_forge_blocks')) return;
-    // Target <pre> elements whose contained <code> has language-forge class,
-    // or whose text content starts with a forge JSON structure
     document.querySelectorAll('#chat pre').forEach(pre => {
         const code = pre.querySelector('code');
         if (!code) return;
         const isForge = code.classList.contains('language-forge') ||
                         code.textContent.trim().startsWith('```forge') ||
                         pre.previousSibling?.textContent?.includes('```forge');
-        // Also check if the raw pre text contains forge block markers
         if (isForge || pre.textContent.includes('"characterName"') && pre.textContent.includes('"stats"')) {
             pre.classList.add('cfr-forge-hidden');
         }
     });
 
-    // Also target code blocks by checking parent structure
     document.querySelectorAll('#chat code.language-forge').forEach(el => {
         const pre = el.closest('pre');
         if (pre) pre.classList.add('cfr-forge-hidden');
@@ -3653,7 +3600,6 @@ function populatePerkDropdowns() {
 }
 
 function bindManualControls() {
-    // ── TABS ──
     $(document).on('click', '.cfr-tab', function() {
         const target = $(this).data('tab');
         $('.cfr-tab').removeClass('active');
@@ -3662,7 +3608,6 @@ function bindManualControls() {
         $(`#${target}`).addClass('active');
     });
 
-    // ── CP / STATS TAB ──
     $('#cfr-btn-set-cp').on('click', () => {
         const val = parseInt($('#cfr-set-cp-val').val());
         if (isNaN(val) || val < 0) return;
@@ -3693,8 +3638,6 @@ function bindManualControls() {
         }
     });
 
-    // ── ADD PERK TAB ──
-    // Show/hide scaling fields when SCALING flag is toggled
     $(document).on('change', '#cfr-add-flags .cfr-add-flag', function() {
         const hasScaling = $('#cfr-add-flags input[value="SCALING"]').prop('checked');
         $('#cfr-add-scaling-fields').toggleClass('visible', hasScaling);
@@ -3734,7 +3677,6 @@ function bindManualControls() {
         }
     });
 
-    // ── EDIT PERK TAB ──
     $('#cfr-edit-select').on('change', function() {
         const name = $(this).val();
         if (!name) { $('#cfr-edit-form').hide(); return; }
@@ -3747,12 +3689,10 @@ function bindManualControls() {
         $('#cfr-edit-desc').val(perk.description);
         $('#cfr-edit-active').prop('checked', perk.active);
 
-        // Set flag checkboxes
         $('#cfr-edit-flags .cfr-edit-flag').each(function() {
             $(this).prop('checked', perk.flags.includes(this.value));
         });
 
-        // Scaling fields — every perk has a scaffold; show always, dim if dormant
         const isActive = perk.scaling?.scaling_active || perk.flags.includes('SCALING') || perk.flags.includes('UNCAPPED');
         $('#cfr-edit-scaling-fields').addClass('visible');
         $('#cfr-edit-level').val(perk.scaling?.level || 1);
@@ -3761,8 +3701,7 @@ function bindManualControls() {
         const dormantNote = document.getElementById('cfr-scaling-dormant-note');
         if (dormantNote) dormantNote.style.display = isActive ? 'none' : 'block';
 
-        // Scaling descriptor section — show when perk has active scaling
-        const hasActiveScaling = isActive; // reuse from above
+        const hasActiveScaling = isActive;
         const sd = perk.scaling_description;
         const hasSd = sd && typeof sd === 'object' && Object.keys(sd).length > 0;
         const descSection = document.getElementById('cfr-edit-scaling-desc-section');
@@ -3771,24 +3710,19 @@ function bindManualControls() {
         if (descSection) descSection.style.display = hasActiveScaling ? 'block' : 'none';
         if (descMissing) descMissing.style.display = (hasActiveScaling && !hasSd) ? 'block' : 'none';
         if (descTa)      descTa.value = hasSd ? scalingDescToText(sd) : '';
-        // Hide post-save prompt when loading new perk
         const postPrompt = document.getElementById('cfr-post-save-gen-prompt');
         if (postPrompt) postPrompt.style.display = 'none';
 
         $('#cfr-edit-form').show();
-        // Update per-perk override status indicators
         refreshPerkOverrideStatus(perk);
     });
 
-    // On flag toggle — keep scaling fields always visible, update dormant state
     $(document).on('change', '#cfr-edit-flags .cfr-edit-flag', function() {
         const flagActive = $('#cfr-edit-flags input[value="SCALING"]').prop('checked')
             || $('#cfr-edit-flags input[value="UNCAPPED"]').prop('checked');
-        // Always visible — just change opacity to signal dormant vs active
         $('#cfr-edit-scaling-fields').addClass('visible').css('opacity', flagActive ? '1' : '0.4');
         const dormantNote = document.getElementById('cfr-scaling-dormant-note');
         if (dormantNote) dormantNote.style.display = flagActive ? 'none' : 'block';
-        // Show/hide descriptor section based on active scaling
         const descSection = document.getElementById('cfr-edit-scaling-desc-section');
         if (descSection) descSection.style.display = flagActive ? 'block' : 'none';
     });
@@ -3800,7 +3734,6 @@ function bindManualControls() {
         const flags = [];
         $('#cfr-edit-flags .cfr-edit-flag:checked').each((_, el) => flags.push(el.value));
 
-        // Always capture level/xp — every perk has a scaffold now
         const rawSdText  = $('#cfr-edit-scaling-desc').val().trim();
         const parsedSd   = rawSdText ? extractScalingDescription(rawSdText) : null;
         const updates = {
@@ -3811,20 +3744,18 @@ function bindManualControls() {
             active:             $('#cfr-edit-active').prop('checked'),
             level:              parseInt($('#cfr-edit-level').val()) || 1,
             xp:                 parseInt($('#cfr-edit-xp').val())   || 0,
-            scaling_description: parsedSd   // null if textarea empty — tracker preserves existing
+            scaling_description: parsedSd
         };
 
         const result = cfrTracker.editPerk(original, updates);
         if (result.success) {
             showStatus('cfr-edit-status', '✅ Saved', 'ok');
-            // Option 5 — if saved perk has active scaling but no level descriptors, nudge gently
             const savedPerk = cfrTracker.state.acquired_perks.find(p => p.name === (updates.name || original));
             const needsDesc = savedPerk?.scaling?.scaling_active
                 && (!savedPerk.scaling_description || !Object.keys(savedPerk.scaling_description || {}).length)
                 && !rawSdText;
             const postPrompt = document.getElementById('cfr-post-save-gen-prompt');
             if (postPrompt) postPrompt.style.display = needsDesc ? 'block' : 'none';
-            // Store perk name for the post-save generate button
             if (needsDesc) postPrompt.dataset.perkName = updates.name || original;
             if (!needsDesc) $('#cfr-edit-select').val('').trigger('change');
         } else {
@@ -3832,7 +3763,6 @@ function bindManualControls() {
         }
     });
 
-    // ── SCALING DESCRIPTOR GENERATE BUTTON (Option 2) ──
     $('#cfr-btn-gen-scaling-desc').on('click', async () => {
         const name = $('#cfr-edit-select').val();
         if (!name) return;
@@ -3845,14 +3775,12 @@ function bindManualControls() {
         if (text) {
             $('#cfr-edit-scaling-desc').val(text);
             showStatus('cfr-scaling-desc-status', '✅ Generated — review then hit Save Changes to commit', 'ok');
-            // Highlight save button so it's obvious confirmation is needed
             $('#cfr-btn-save-edit').css({'background':'rgba(241,196,15,0.2)','border-color':'#f1c40f','color':'#f1c40f'});
         } else {
             showStatus('cfr-scaling-desc-status', '⚠️ Generation failed — check ST connection', 'err');
         }
     });
 
-    // ── POST-SAVE GENERATE PROMPT (Option 5) ──
     $('#cfr-post-save-yes').on('click', async () => {
         const postPrompt = document.getElementById('cfr-post-save-gen-prompt');
         const perkName   = postPrompt?.dataset?.perkName;
@@ -3862,7 +3790,6 @@ function bindManualControls() {
         postPrompt.innerHTML = '<div style="font-size:10px;color:#888;padding:4px;">⏳ Generating…</div>';
         const text = await generatePerkScalingDesc(perk);
         if (text) {
-            // Reload perk into edit form so the textarea is visible and populated
             $('#cfr-edit-select').val(perkName).trigger('change');
             $('#cfr-edit-scaling-desc').val(text);
             showStatus('cfr-scaling-desc-status', '✅ Generated — review then hit Save Changes', 'ok');
@@ -3879,12 +3806,10 @@ function bindManualControls() {
         $('#cfr-edit-select').val('').trigger('change');
     });
 
-    // Reset save button highlight whenever user edits the descriptor textarea
     $(document).on('input', '#cfr-edit-scaling-desc', () => {
         $('#cfr-btn-save-edit').css({'background':'','border-color':'','color':''});
     });
 
-    // ── PER-PERK OVERRIDES ──
     $('#cfr-btn-perk-scale').on('click', () => {
         const name = $('#cfr-edit-select').val();
         if (!name) { showStatus('cfr-edit-status', '⚠️ Select a perk first', 'err'); return; }
@@ -3892,7 +3817,6 @@ function bindManualControls() {
         if (result.success) {
             const perk = cfrTracker.state.acquired_perks.find(p => p.name === name);
             refreshPerkOverrideStatus(perk);
-            // Tick SCALING checkbox in form so user sees it reflected
             $('#cfr-edit-flags input[value="SCALING"]').prop('checked', true);
             $('#cfr-edit-scaling-fields').addClass('visible');
             if (perk?.scaling) {
@@ -3935,7 +3859,6 @@ function bindManualControls() {
         }
     });
 
-    // ── REMOVE TAB ──
     $('#cfr-btn-remove-perk').on('click', () => {
         const name = $('#cfr-remove-select').val();
         if (!name) { showStatus('cfr-remove-status', '⚠️ Select a perk first', 'err'); return; }
@@ -3946,7 +3869,6 @@ function bindManualControls() {
             result.success ? 'ok' : 'err');
     });
 
-    // ── IMPORT / EXPORT TAB ──
     $('#cfr-btn-export').on('click', () => {
         $('#cfr-io-area').val(cfrTracker.exportJSON());
         showStatus('cfr-io-status', '✅ State exported to text area', 'ok');
@@ -3963,7 +3885,6 @@ function bindManualControls() {
     });
 }
 
-// Updates the status spans next to the per-perk override buttons
 function refreshPerkOverrideStatus(perk) {
     const scaleEl = document.getElementById('cfr-perk-scale-status');
     const uncapEl = document.getElementById('cfr-perk-uncap-status');
@@ -3985,7 +3906,6 @@ function refreshPerkOverrideStatus(perk) {
     }
 }
 
-// Called from onclick in updateConstellationManagerList
 window.cfrDeleteConstellation = async function(key) {
     if (!confirm(`Remove constellation "${key}" from the list?
 Perk data is preserved — you can re-add later.`)) return;
@@ -4025,8 +3945,6 @@ function bindExtensionSettings() {
         cfrSaveDebounced();
     });
 
-    // Gist settings
-    // Save credentials only — never touches data direction
     $('#cfr-btn-gist-save').on('click', () => {
         const id  = $('#cfr-gist-id').val().trim();
         const pat = $('#cfr-gist-pat').val().trim();
@@ -4040,7 +3958,6 @@ function bindExtensionSettings() {
         showStatus('cfr-gist-status', '✅ Credentials saved — use Push or Pull to sync data', 'ok');
     });
 
-    // Push: local state → Gist (overwrites Gist with what extension shows)
     $('#cfr-btn-gist-push').on('click', async () => {
         if (!cfrSettings?.gist_id || !cfrSettings?.gist_pat) {
             showStatus('cfr-gist-status', '⚠️ Save credentials first', 'err');
@@ -4052,7 +3969,6 @@ function bindExtensionSettings() {
         showStatus('cfr-gist-status', '✅ Local state pushed to Gist', 'ok');
     });
 
-    // Pull: Gist → local state (overwrites extension with what Gist has)
     $('#cfr-btn-gist-pull').on('click', async () => {
         if (!cfrSettings?.gist_id || !cfrSettings?.gist_pat) {
             showStatus('cfr-gist-status', '⚠️ Save credentials first', 'err');
@@ -4076,7 +3992,6 @@ function loadExtensionSettingsUI() {
     $('#cfr-debug').prop('checked',          cfrSettings.debug_mode);
     $('#cfr-cp-per-resp').val(               cfrSettings.cp_per_response);
 
-    // Pre-fill Gist fields if already configured
     if (cfrSettings.gist_id)  $('#cfr-gist-id').val(cfrSettings.gist_id);
     if (cfrSettings.gist_pat) $('#cfr-gist-pat').val(cfrSettings.gist_pat);
     updateProfileUI();
@@ -4087,24 +4002,20 @@ function loadExtensionSettingsUI() {
 //  MESSAGE HANDLING
 // ============================================================
 
-// Stamp current tracker state as a forge block into the ST send textarea.
-// Player reviews it, then hits Send — AI sees it in chat history as authoritative state.
 function stampForgeBlock() {
     if (!cfrTracker) {
         showRollToast('Tracker not initialised', true);
         return;
     }
 
-    const block = cfrTracker.toForgeInjection();  // returns the ```forge...``` string
+    const block = cfrTracker.toForgeInjection();
     if (!block) {
         showRollToast('Nothing to stamp — no state loaded', true);
         return;
     }
 
-    // ST's main send textarea
     const ta = document.getElementById('send_textarea');
     if (!ta) {
-        // Fallback: copy to clipboard
         navigator.clipboard?.writeText(block).then(() => {
             showRollToast('📋 Forge block copied to clipboard — paste into chat');
         }).catch(() => {
@@ -4114,21 +4025,15 @@ function stampForgeBlock() {
         return;
     }
 
-    // Prepend to any existing text so we don't wipe a message they were typing
     const existing = ta.value.trim();
-    ta.value = existing ? `${block}
+    ta.value = existing ? `${block}\n\n${existing}` : block;
 
-${existing}` : block;
-
-    // Trigger ST's input listeners so character count etc. updates
     ta.dispatchEvent(new Event('input', { bubbles: true }));
     ta.focus();
 
     showRollToast('📋 Forge block ready in send box — review and send');
 }
 
-// Force the invisible prompt injection to reflect current state immediately.
-// Useful after a profile switch so the AI context is correct before the next message.
 function forceSyncPrompt() {
     if (!cfrTracker) return;
     updatePromptInjection();
@@ -4138,68 +4043,22 @@ function forceSyncPrompt() {
 window.stampForgeBlock  = stampForgeBlock;
 window.forceSyncPrompt  = forceSyncPrompt;
 
-// Passive scanner — catches perk headers in ANY response even without an active roll
-// Shows a toast so the player can manually add if needed
-function passivePerkScan(text) {
-    const match = text.match(/^\*\*\[?([^*:\n\[\]]+?)\]?\*\*\s*\((\d+)\s*CP\)\s*\[([^\]]*)\]/m);
-    if (!match) return;
-    const name  = match[1].trim();
-    const cost  = parseInt(match[2]);
-    const flags = match[3].split(/[,\s]+/).map(f => f.trim()).filter(Boolean);
-
-    // Only surface it if it's not already acquired
-    const already = cfrTracker?.state?.acquired_perks?.some(p =>
-        p.name.toLowerCase() === name.toLowerCase()
-    );
-    if (already) return;
-
-    console.log('[CFR] Passive scan found perk:', name, cost, flags);
-
-    // Build a roll card for it so player can still Acquire/Bank/Discard
-    const perk = {
-        name, cost, flags,
-        description: extractDescriptionFromText(text, name),
-        scaling_description: extractScalingDescription(text),
-        source: 'detected'
-    };
-    cfrActiveRoll = {
-        type: 'creation',
-        perk,
-        constellationKey:   cfrCreationConstellation || '',
-        constellationLabel: getActiveConstellations()[cfrCreationConstellation] || 'Unknown Constellation'
-    };
-
-    const hud = document.getElementById('cfr-hud');
-    const btn = document.getElementById('cfr-hud-btn');
-    if (hud && hud.classList.contains('hidden')) {
-        hud.classList.remove('hidden');
-        if (btn) btn.classList.add('open');
-    }
-    showRollResult(perk, cfrActiveRoll.constellationKey, cfrActiveRoll.constellationLabel, 'creation');
-    showRollToast('Perk detected in response — choose Acquire, Bank, or Discard');
-}
-
 async function onMessageReceived(data) {
     if (!cfrTracker || !cfrSettings?.enabled) return;
 
     const ctx = SillyTavern.getContext();
 
-    // Index-based dedup — find actual last AI message index
     const idx = (ctx?.chat?.length ?? 0) - 1;
     if (idx <= cfrLastMsgIdx) return;
     cfrLastMsgIdx = idx;
 
-    // Always prefer raw .mes from chat array — event payloads vary wildly
-    // between ST versions and DOM textContent strips markdown formatting
     let text = ctx?.chat?.[idx]?.mes || '';
 
-    // Fallback chain only if chat array didn't give us text
     if (!text) {
         text = typeof data === 'string' ? data
              : (data?.message || data?.mes || data?.content || '');
     }
 
-    // Skip user messages
     if (ctx?.chat?.[idx]?.is_user) return;
 
     if (!text) {
@@ -4209,35 +4068,36 @@ async function onMessageReceived(data) {
 
     if (cfrSettings.debug_mode) console.log('[CFR] 📨 Processing message idx', idx, '— text length:', text.length);
 
-    // Check both memory and sessionStorage for awaiting flag
     const isAwaitingRoll = cfrAwaitingCreation || cfrGetAwaiting();
     if (isAwaitingRoll) {
         await finalizeCreationRoll(text);
     } else {
-        // Fallback: always scan for perk format even without an active roll
-        // catches cases where the flag was lost between click and response
         passivePerkScan(text);
     }
 
     cfrTracker.processResponse(text);
 
-    // Sync character state to Gist after each AI message (2s delay to batch rapid changes)
     setTimeout(() => gistSaveState(), 2000);
 
-    // Inject details into last message after a short delay
-    // (DOM may not be updated synchronously with the event)
     setTimeout(() => {
         refreshLastDetail();
         hideForgeBlocks();
     }, 300);
 }
 
+// FIX: Debounce guard prevents onChatChanged from firing multiple times simultaneously.
+// ST can fire CHAT_CHANGED + CHAT_LOADED + CHARACTER_LOADED in rapid succession on
+// a single chat switch, which was causing duplicate Gist pulls and state stomping.
+let cfrChatChangePending = false;
+
 async function onChatChanged() {
+    if (cfrChatChangePending) return;
+    cfrChatChangePending = true;
+    setTimeout(() => { cfrChatChangePending = false; }, 500);
+
     if (!cfrTracker) return;
     cfrLastMsgIdx = -1;
 
-    // Clear any in-flight roll state from the previous chat
-    // so it doesn't contaminate the incoming chat context
     if (cfrActiveRoll) {
         cfrActiveRoll = null;
         hideRollCard?.();
@@ -4245,7 +4105,6 @@ async function onChatChanged() {
     if (cfrAwaitingCreation || cfrGetAwaiting()) {
         cfrAwaitingCreation = false;
         cfrSetAwaiting(false);
-        // Also clear the creation prompt injection from ST
         try {
             const ctx = SillyTavern.getContext();
             if (typeof ctx.setExtensionPrompt === 'function') {
@@ -4254,21 +4113,17 @@ async function onChatChanged() {
         } catch(e) {}
     }
 
-    // First: try localStorage for this chat
     const ctx      = SillyTavern.getContext();
     const localKey = ctx?.chatId ? `cfr_${ctx.chatId}` : null;
     const hasLocal = localKey && !!localStorage.getItem(localKey);
 
     cfrTracker.load();
 
-    // If localStorage had nothing for this chat AND Gist is configured,
-    // pull the active profile — this is the "new chat, carry perks across" case
     if (!hasLocal && cfrSettings?.gist_id && cfrSettings?.gist_pat) {
         if (cfrSettings.debug_mode) console.log('[CFR] New chat — pulling profile from Gist:', getActiveProfile());
         showStatus('cfr-gist-status', '⬇ Loading profile for new chat…', 'ok');
         try {
             await gistLoad(getActiveProfile());
-            // Seed localStorage for this chat so future loads within the session are instant
             cfrTracker.save();
             showStatus('cfr-gist-status', `✅ Profile "${getActiveProfile()}" loaded`, 'ok');
         } catch(e) {
@@ -4278,7 +4133,7 @@ async function onChatChanged() {
 
     updateTrackerUI();
     updateHUD();
-    updatePromptInjection();   // ← push correct state to AI before first message
+    updatePromptInjection();
     updateProfileUI();
 
     setTimeout(() => {
@@ -4291,7 +4146,7 @@ async function onChatChanged() {
 
 
 // ============================================================
-//  MUTATION OBSERVER — backup + forge hiding + details refresh
+//  MUTATION OBSERVER
 // ============================================================
 
 function setupObserver() {
@@ -4307,21 +4162,17 @@ function setupObserver() {
             for (const node of mut.addedNodes) {
                 if (node.nodeType !== 1) continue;
 
-                // New AI message element added to chat
                 if (node.classList?.contains('mes') && !node.classList.contains('is_user')) {
                     setTimeout(() => {
-                        // Pull raw text from chat array using the message's data-mesid attribute
-                        // DO NOT use textContent — it strips markdown and breaks all regex parsing
                         const mesId = parseInt(node.getAttribute('mesid') ?? '-1');
                         const ctx   = SillyTavern.getContext();
                         const raw   = (mesId >= 0 && ctx?.chat?.[mesId]?.mes) ? ctx.chat[mesId].mes : null;
                         if (raw) onMessageReceived(raw);
                         injectDetailsIntoMessage(node);
                         hideForgeBlocks();
-                    }, 500);  // slightly longer delay to ensure chat array is populated
+                    }, 500);
                 }
 
-                // A pre/code block added — might be forge block
                 if (node.tagName === 'PRE' || node.querySelector?.('pre')) {
                     setTimeout(() => hideForgeBlocks(), 100);
                 }
@@ -4376,8 +4227,6 @@ function setupEventListeners() {
         console.log('[CFR] ✅ Bound: CHAT_CHANGED');
     }
 
-    // Also bind CHAT_CREATED and CHAT_LOADED if ST exposes them — covers edge cases
-    // where a brand new chat fires a different event than an existing chat switch
     for (const evName of ['CHAT_CREATED', 'CHAT_LOADED', 'CHARACTER_LOADED']) {
         if (cfrEventTypes[evName]) {
             cfrEventSource.on(cfrEventTypes[evName], onChatChanged);
@@ -4390,46 +4239,38 @@ function setupEventListeners() {
 }
 
 jQuery(async () => {
-    console.log('[CFR] 🚀 Celestial Forge Reformed v1.0.0 initializing…');
+    console.log('[CFR] 🚀 Celestial Forge Reformed v1.0.1 initializing…');
 
     loadSettings();
 
-    // Inject tracker drawer into ST Extensions panel
     $('#extensions_settings').append(getCFRSettingsHtml());
 
-    // Build tracker
     cfrTracker = new CelestialForgeTracker();
     cfrTracker.load();
 
-    // Inject HUD (includes roll panel HTML)
     injectHUD();
 
-    // Bind all events
     bindManualControls();
     bindExtensionSettings();
     bindRollButtons();
     loadExtensionSettingsUI();
 
-    // Initial UI render
     updateTrackerUI();
     updateHUD();
     updateBankedList();
     updatePromptInjection();
 
-    // Expose globals
     window.cfrTracker                 = cfrTracker;
     window.CelestialForgeTracker      = CelestialForgeTracker;
     window.getCelestialForgeInjection = () => cfrTracker?.toContextBlock()   || '';
     window.getCelestialForgeJSON      = () => cfrTracker?.toForgeInjection() || '';
     window.getCelestialForgePrompt    = () => buildPromptBlock()             || '';
-    window.cfrPerkDB                  = () => cfrPerkDB; // read-only reference
-    window.cfrGistSaveDB              = gistSaveDB;      // manual save trigger
+    window.cfrPerkDB                  = () => cfrPerkDB;
+    window.cfrGistSaveDB              = gistSaveDB;
     window.cfrGistSaveState           = gistSaveState;
 
-    // ST event listeners
     setupEventListeners();
 
-    // Load Gist data if configured (async, non-blocking)
     if (cfrSettings?.gist_id && cfrSettings?.gist_pat) {
         gistLoad().then(() => {
             updateTrackerUI();
@@ -4437,16 +4278,15 @@ jQuery(async () => {
             updateBankedList();
             updatePromptInjection();
             updateProfileUI();
-            refreshConstellationDropdowns(); // ensure custom constellations appear in roll panel
+            refreshConstellationDropdowns();
             console.log('[CFR] ☁️ Gist sync complete on init');
         }).catch(e => console.warn('[CFR] Gist init load failed:', e));
     } else {
         cfrPerkDB = buildEmptyDB();
-        refreshConstellationDropdowns(); // populate dropdown with base constellations grouped
+        refreshConstellationDropdowns();
         console.log('[CFR] ℹ️ No Gist configured — using local DB only. Add Gist ID + PAT in Settings.');
     }
 
-    // MutationObserver (backup + forge hiding)
     setTimeout(() => {
         setupObserver();
         refreshAllDetails();
@@ -4456,5 +4296,4 @@ jQuery(async () => {
     console.log('[CFR] ✨ Ready!', cfrTracker.status());
 });
 
-// NOTE: No `export` statement — ST loads this as a plain script,
-// not an ES module. Use window.cfrTracker for console access.
+// NOTE: No `export` statement — ST loads this as a plain script, not an ES module.
