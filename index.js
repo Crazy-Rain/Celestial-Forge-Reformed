@@ -2477,7 +2477,6 @@ function applyLastForgeBlock() {
         return;
     }
 
-    // Find last AI message with a forge block
     let raw = null;
     for (let i = ctx.chat.length - 1; i >= 0; i--) {
         if (!ctx.chat[i].is_user && ctx.chat[i].mes?.includes('```forge')) {
@@ -2491,15 +2490,17 @@ function applyLastForgeBlock() {
         return;
     }
 
-    const synced = cfrTracker.syncFromForge(raw);
-    if (synced) {
-        updateTrackerUI();
-        updateHUD();
-        updatePromptInjection();
-        showRollToast('✅ Forge block applied — state updated');
-    } else {
-        showRollToast('⚠️ Forge block found but sync failed — check format', true);
+    const parsed = cfrTracker.parseForgeBlock(raw);
+    if (!parsed) {
+        showRollToast('⚠️ Forge block found but could not parse JSON — check AI output format', true);
+        return;
     }
+
+    cfrTracker.syncFromForge(parsed);
+    updateTrackerUI();
+    updateHUD();
+    updatePromptInjection();
+    showRollToast('✅ Forge block applied — state updated');
 }
 
 window.scanLastMessage    = scanLastMessage;
@@ -3106,14 +3107,14 @@ UNCAPPED: Marginal refinement per level..." style="width:100%;height:90px;backgr
           </div>
           <div id="cfr-global-mod-status" style="font-size:11px;margin-bottom:6px;"></div>
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
-            <span style="font-size:12px;color:#ccc;">🎮 GAMER active</span>
+            <span style="font-size:12px;color:#ccc;">🎮 GAMER</span>
             <span id="cfr-gamer-status" style="font-size:11px;color:#555;">inactive</span>
           </div>
           <div class="cfr-btn-row" style="margin-bottom:8px;">
             <input type="button" class="menu_button" id="cfr-btn-apply-gamer" value="Activate GAMER" />
           </div>
           <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:5px;">
-            <span style="font-size:12px;color:#ccc;">⚡ UNCAPPED active</span>
+            <span style="font-size:12px;color:#ccc;">⚡ UNCAPPED</span>
             <span id="cfr-uncapped-status" style="font-size:11px;color:#555;">inactive</span>
           </div>
           <div class="cfr-btn-row">
