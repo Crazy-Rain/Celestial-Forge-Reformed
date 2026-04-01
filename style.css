@@ -520,7 +520,8 @@
 
 /* ── HUD floating button ───────────────────────────────────── */
 #cfr-hud-btn {
-    position: fixed;
+    position: fixed !important;
+    /* Default desktop: above ST's send bar */
     bottom: 80px;
     right: 20px;
     width: 42px;
@@ -529,23 +530,38 @@
     background: radial-gradient(circle at 35% 35%, #2a1a2e, #0d0d1a);
     border: 1.5px solid #e94560;
     box-shadow: 0 0 12px #e9456055, 0 2px 8px rgba(0,0,0,0.6);
-    display: flex;
+    display: flex !important;
     align-items: center;
     justify-content: center;
     font-size: 18px;
     cursor: pointer;
-    z-index: 9998;
+    /* ST mobile overlays go into the 100k–900k range; sit above all of them */
+    z-index: 999999 !important;
     transition: box-shadow 0.2s, transform 0.15s;
     user-select: none;
     touch-action: none;
+    /* Prevent ST from hiding it via overflow:hidden on a parent */
+    transform: translateZ(0);
 }
 
 #cfr-hud-btn:hover  { box-shadow: 0 0 20px #e9456088, 0 3px 12px rgba(0,0,0,0.7); }
 #cfr-hud-btn.open   { border-color: #ffd700; box-shadow: 0 0 18px #ffd70055, 0 2px 8px rgba(0,0,0,0.6); }
 
+/* Mobile: ST's send bar is taller and system chrome eats more space at the bottom.
+   Push the button up so it clears both. */
+@media (max-width: 768px) {
+    #cfr-hud-btn {
+        bottom: 120px;
+        right: 14px;
+        width: 46px;
+        height: 46px;
+        font-size: 20px;
+    }
+}
+
 /* ── HUD panel ─────────────────────────────────────────────── */
 #cfr-hud {
-    position: fixed;
+    position: fixed !important;
     bottom: 132px;
     right: 16px;
     width: 300px;
@@ -554,18 +570,31 @@
     border: 1px solid #1a1a2e;
     border-radius: 10px;
     box-shadow: 0 8px 32px rgba(0,0,0,0.7), 0 0 0 1px #e9456022;
-    z-index: 9997;
+    z-index: 999998 !important;
     display: flex;
     flex-direction: column;
     overflow: hidden;
     transition: opacity 0.15s, transform 0.15s;
     font-family: 'Segoe UI', system-ui, sans-serif;
+    /* Same stacking-context escape as button */
+    transform: translateZ(0);
+}
+
+/* Mobile: use nearly full width so it's actually readable */
+@media (max-width: 768px) {
+    #cfr-hud {
+        bottom: 178px;
+        right: 8px;
+        left: 8px;
+        width: auto;
+        max-height: 72vh;
+    }
 }
 
 #cfr-hud.hidden {
     opacity: 0;
     pointer-events: none;
-    transform: translateY(8px) scale(0.97);
+    transform: translateY(8px) scale(0.97) translateZ(0);
 }
 
 /* ── HUD header ────────────────────────────────────────────── */
