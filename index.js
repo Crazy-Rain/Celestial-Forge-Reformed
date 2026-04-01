@@ -3184,7 +3184,12 @@ function injectHUD() {
     $('#cfr-hud').remove();
     $('#cfr-hud-btn').remove();
 
-    $('body').append(`
+    // Use insertAdjacentHTML on the raw document.body node rather than
+    // $('body').append(). jQuery's append runs through ST's DOM pipeline
+    // which on mobile can place the elements inside a wrapper that has
+    // overflow:hidden or an explicit stacking context — both of which
+    // silently break position:fixed and bury the button under ST's UI.
+    document.body.insertAdjacentHTML('beforeend', `
         <div id="cfr-hud-btn" title="Drag to move · Click to toggle">⚒️</div>
         <div id="cfr-hud" class="hidden">
           <div class="cfr-hud-header">
