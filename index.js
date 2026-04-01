@@ -1942,12 +1942,7 @@ async function finalizeCreationRoll(text) {
         constellationLabel: getActiveConstellations()[cfrCreationConstellation] || cfrCreationConstellation
     };
 
-    const hud = document.getElementById('cfr-hud');
-    const btn = document.getElementById('cfr-hud-btn');
-    if (hud && hud.classList.contains('hidden')) {
-        hud.classList.remove('hidden');
-        if (btn) btn.classList.add('open');
-    }
+    setHUDVisible(true);
 
     showRollResult(perk, cfrActiveRoll.constellationKey, cfrActiveRoll.constellationLabel, 'creation');
 }
@@ -2391,12 +2386,7 @@ function passivePerkScan(text) {
             constellationLabel: getActiveConstellations()[cfrCreationConstellation] || 'Unknown Constellation'
         };
 
-        const hud = document.getElementById('cfr-hud');
-        const btn = document.getElementById('cfr-hud-btn');
-        if (hud && hud.classList.contains('hidden')) {
-            hud.classList.remove('hidden');
-            if (btn) btn.classList.add('open');
-        }
+        setHUDVisible(true);
         showRollResult(perk, cfrActiveRoll.constellationKey, cfrActiveRoll.constellationLabel, 'creation');
         showRollToast('Perk detected in response — choose Acquire, Bank, or Discard');
         return; // surface one at a time — player resolves each before next fires
@@ -3184,57 +3174,114 @@ function injectHUD() {
     $('#cfr-hud').remove();
     $('#cfr-hud-btn').remove();
 
-    // Use insertAdjacentHTML on the raw document.body node rather than
-    // $('body').append(). jQuery's append runs through ST's DOM pipeline
-    // which on mobile can place the elements inside a wrapper that has
-    // overflow:hidden or an explicit stacking context — both of which
-    // silently break position:fixed and bury the button under ST's UI.
-    document.body.insertAdjacentHTML('beforeend', `
-        <div id="cfr-hud-btn" title="Drag to move · Click to toggle">⚒️</div>
-        <div id="cfr-hud" class="hidden">
-          <div class="cfr-hud-header">
-            <p class="cfr-hud-title">Celestial Forge</p>
-            <div class="cfr-hud-sub" id="cfr-hud-sync">waiting…</div>
-            <div class="cfr-hud-sub" id="cfr-hud-profile" style="color:#f1c40f;font-size:9px;margin-top:1px;">profile: default</div>
-          </div>
-          <div class="cfr-hud-cp">
-            <div class="cfr-hud-cp-box">
-              <div class="cfr-hud-cp-label">Available CP</div>
-              <div class="cfr-hud-cp-val" id="cfr-hud-avail">0</div>
-            </div>
-            <div class="cfr-hud-cp-box">
-              <div class="cfr-hud-cp-label">Total CP</div>
-              <div class="cfr-hud-cp-val" id="cfr-hud-total">0</div>
-            </div>
-            <div class="cfr-hud-cp-box">
-              <div class="cfr-hud-cp-label">Spent</div>
-              <div class="cfr-hud-cp-val" id="cfr-hud-spent">0</div>
-            </div>
-          </div>
-          <div class="cfr-hud-meters">
-            <div class="cfr-hud-meter-row">
-              <div class="cfr-hud-meter-label" style="color:#9b59b6">CORRUPTION</div>
-              <div class="cfr-hud-meter-track">
-                <div class="cfr-hud-meter-fill" id="cfr-hud-corr-fill" style="background:#9b59b6;width:0%"></div>
-              </div>
-              <div class="cfr-hud-meter-val" id="cfr-hud-corr-val">0%</div>
-            </div>
-            <div class="cfr-hud-meter-row">
-              <div class="cfr-hud-meter-label" style="color:#3498db">SANITY</div>
-              <div class="cfr-hud-meter-track">
-                <div class="cfr-hud-meter-fill" id="cfr-hud-san-fill" style="background:#3498db;width:0%"></div>
-              </div>
-              <div class="cfr-hud-meter-val" id="cfr-hud-san-val">0%</div>
-            </div>
-          </div>
-          <div id="cfr-hud-pending"></div>
-          <div class="cfr-hud-perks">
-            <div class="cfr-hud-perks-title">Acquired Perks (<span id="cfr-hud-perk-count">0</span>)</div>
-            <div id="cfr-hud-perk-list"><small style="color:#555;">No perks yet.</small></div>
-          </div>
-          ${getRollPanelHTML()}
+    // ── Detect mobile once ─────────────────────────────────────────────────
+    const isMobile = window.innerWidth <= 768 || /Mobi|Android/i.test(navigator.userAgent);
+
+    // ── BUTTON ─────────────────────────────────────────────────────────────
+    // Build via DOM API and apply ALL positioning/appearance styles inline.
+    // Do NOT rely on style.css loading — on mobile, extension CSS can silently
+    // fail (cache miss, path mismatch, CSP), leaving a 0×0 invisible div.
+    // Inline styles win even if the stylesheet never loads.
+    const btn = document.createElement('div');
+    btn.id        = 'cfr-hud-btn';
+    btn.title     = 'Tap to open Celestial Forge';
+    btn.innerHTML = '⚒️';
+    Object.assign(btn.style, {
+        position:                'fixed',
+        bottom:                  isMobile ? '120px' : '80px',
+        right:                   isMobile ? '14px'  : '20px',
+        width:                   isMobile ? '48px'  : '42px',
+        height:                  isMobile ? '48px'  : '42px',
+        borderRadius:            '50%',
+        background:              'radial-gradient(circle at 35% 35%, #2a1a2e, #0d0d1a)',
+        border:                  '2px solid #e94560',
+        boxShadow:               '0 0 14px rgba(233,69,96,0.45), 0 2px 8px rgba(0,0,0,0.7)',
+        display:                 'flex',
+        alignItems:              'center',
+        justifyContent:          'center',
+        fontSize:                isMobile ? '20px' : '18px',
+        cursor:                  'pointer',
+        zIndex:                  '2147483647',       // INT_MAX — beats every ST layer
+        userSelect:              'none',
+        webkitUserSelect:        'none',
+        touchAction:             'manipulation',     // NOT 'none' — 'none' swallows taps on Android
+        webkitTapHighlightColor: 'transparent',
+        transform:               'translateZ(0)',    // own GPU layer / stacking context
+        webkitTransform:         'translateZ(0)'
+    });
+    document.body.appendChild(btn);
+
+    // ── PANEL ──────────────────────────────────────────────────────────────
+    const panel = document.createElement('div');
+    panel.id        = 'cfr-hud';
+    panel.className = 'hidden';
+    Object.assign(panel.style, {
+        position:        'fixed',
+        bottom:          isMobile ? '180px' : '132px',
+        right:           isMobile ? '8px'   : '16px',
+        left:            isMobile ? '8px'   : 'auto',
+        width:           isMobile ? 'auto'  : '300px',
+        maxHeight:       '80vh',
+        background:      'linear-gradient(160deg,#0d0d1a 0%,#0a0a14 100%)',
+        border:          '1px solid #1a1a2e',
+        borderRadius:    '10px',
+        boxShadow:       '0 8px 32px rgba(0,0,0,0.7)',
+        zIndex:          '2147483646',
+        display:         'flex',
+        flexDirection:   'column',
+        overflow:        'hidden',
+        transition:      'opacity 0.15s, transform 0.15s',
+        fontFamily:      "'Segoe UI',system-ui,sans-serif",
+        // Start hidden — toggled by btn click via updateHUDVisibility()
+        opacity:         '0',
+        pointerEvents:   'none',
+        transform:       'translateY(8px) scale(0.97) translateZ(0)',
+        webkitTransform: 'translateY(8px) scale(0.97) translateZ(0)'
+    });
+    panel.innerHTML = `
+        <div class="cfr-hud-header">
+          <p class="cfr-hud-title">Celestial Forge</p>
+          <div class="cfr-hud-sub" id="cfr-hud-sync">waiting…</div>
+          <div class="cfr-hud-sub" id="cfr-hud-profile" style="color:#f1c40f;font-size:9px;margin-top:1px;">profile: default</div>
         </div>
-    `);
+        <div class="cfr-hud-cp">
+          <div class="cfr-hud-cp-box">
+            <div class="cfr-hud-cp-label">Available CP</div>
+            <div class="cfr-hud-cp-val" id="cfr-hud-avail">0</div>
+          </div>
+          <div class="cfr-hud-cp-box">
+            <div class="cfr-hud-cp-label">Total CP</div>
+            <div class="cfr-hud-cp-val" id="cfr-hud-total">0</div>
+          </div>
+          <div class="cfr-hud-cp-box">
+            <div class="cfr-hud-cp-label">Spent</div>
+            <div class="cfr-hud-cp-val" id="cfr-hud-spent">0</div>
+          </div>
+        </div>
+        <div class="cfr-hud-meters">
+          <div class="cfr-hud-meter-row">
+            <div class="cfr-hud-meter-label" style="color:#9b59b6">CORRUPTION</div>
+            <div class="cfr-hud-meter-track">
+              <div class="cfr-hud-meter-fill" id="cfr-hud-corr-fill" style="background:#9b59b6;width:0%"></div>
+            </div>
+            <div class="cfr-hud-meter-val" id="cfr-hud-corr-val">0%</div>
+          </div>
+          <div class="cfr-hud-meter-row">
+            <div class="cfr-hud-meter-label" style="color:#3498db">SANITY</div>
+            <div class="cfr-hud-meter-track">
+              <div class="cfr-hud-meter-fill" id="cfr-hud-san-fill" style="background:#3498db;width:0%"></div>
+            </div>
+            <div class="cfr-hud-meter-val" id="cfr-hud-san-val">0%</div>
+          </div>
+        </div>
+        <div id="cfr-hud-pending"></div>
+        <div class="cfr-hud-perks">
+          <div class="cfr-hud-perks-title">Acquired Perks (<span id="cfr-hud-perk-count">0</span>)</div>
+          <div id="cfr-hud-perk-list"><small style="color:#555;">No perks yet.</small></div>
+        </div>
+        ${getRollPanelHTML()}
+    `;
+    document.body.appendChild(panel);
 
     bindHUDDrag();
 }
@@ -3282,9 +3329,42 @@ function bindHUDDrag() {
     btn.addEventListener('click', () => {
         if (moved) return;
         const hud = document.getElementById('cfr-hud');
-        hud.classList.toggle('hidden');
-        btn.classList.toggle('open', !hud.classList.contains('hidden'));
+        if (!hud) return;
+        setHUDVisible(hud.dataset.cfrOpen !== '1');
     });
+}
+
+// ── Inline-style-driven show/hide — does NOT depend on style.css loading ──
+function setHUDVisible(open) {
+    const hud = document.getElementById('cfr-hud');
+    const btn = document.getElementById('cfr-hud-btn');
+    if (!hud) return;
+
+    hud.dataset.cfrOpen = open ? '1' : '0';
+
+    if (open) {
+        hud.classList.remove('hidden');
+        hud.style.opacity         = '1';
+        hud.style.pointerEvents   = 'auto';
+        hud.style.transform       = 'translateY(0) scale(1) translateZ(0)';
+        hud.style.webkitTransform = 'translateY(0) scale(1) translateZ(0)';
+        if (btn) {
+            btn.classList.add('open');
+            btn.style.borderColor = '#ffd700';
+            btn.style.boxShadow   = '0 0 18px rgba(255,215,0,0.35), 0 2px 8px rgba(0,0,0,0.7)';
+        }
+    } else {
+        hud.classList.add('hidden');
+        hud.style.opacity         = '0';
+        hud.style.pointerEvents   = 'none';
+        hud.style.transform       = 'translateY(8px) scale(0.97) translateZ(0)';
+        hud.style.webkitTransform = 'translateY(8px) scale(0.97) translateZ(0)';
+        if (btn) {
+            btn.classList.remove('open');
+            btn.style.borderColor = '#e94560';
+            btn.style.boxShadow   = '0 0 14px rgba(233,69,96,0.45), 0 2px 8px rgba(0,0,0,0.7)';
+        }
+    }
 }
 
 function updateHUD() {
